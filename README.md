@@ -14,6 +14,70 @@ the model, and a missing or stale signal reads as *unknown* instead of being inv
 [docs/DATA-AND-CONSENT.md](docs/DATA-AND-CONSENT.md) is the contract for identity, tenant
 isolation, consent, freshness, retention and deletion.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Phone["User's phone"]
+        SMS[SMS]
+        VOICE[Voice call]
+        WEB[Browser]
+    end
+
+    subgraph Providers
+        TW[Twilio\n+44 7414 145611]
+        EL[ElevenLabs Agent\nSTT / LLM / TTS]
+        ANT[Anthropic API\nSMS brain]
+    end
+
+    subgraph Pi["Raspberry Pi 5 · runhack.keanuc.net"]
+        CADDY[Caddy\nTLS + CrowdSec]
+        APP[checkin\nsingle Go binary]
+        PG[(Postgres 16)]
+    end
+
+    GCAL[Google Calendar ICS]
+    EVENTS[(Hackathon Radar\nevent export)]
+
+    SMS -->|texts| TW -->|signed webhook /sms| CADDY
+    VOICE <-->|PSTN| TW <-->|native integration| EL
+    EL -->|tool webhooks /tools/*| CADDY
+    EL -->|post-call transcript\nHMAC /webhooks/elevenlabs| CADDY
+    WEB -->|wizard · OTP · dashboard| CADDY
+    CADDY --> APP
+    APP <--> PG
+    APP -->|conversation| ANT
+    APP -->|outbound call API| EL
+    APP -.->|5-min cache| GCAL
+    EVENTS -->|seed 271 events| PG
+```
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant W as Web wizard
+    participant A as checkin (Go)
+    participant T as Twilio
+    participant E as ElevenLabs agent
+
+    U->>W: phone number
+    W->>A: /login start
+    A->>T: send OTP
+    T-->>U: SMS code
+    U->>W: code + name + channel
+    A->>E: outbound call (dynamic variables: greeting, ask_only…)
+    E-->>U: rings, interviews one question at a time
+    E->>A: save_onboarding / save_checkin (tool webhooks)
+    E->>A: post-call transcript (HMAC webhook)
+    U->>W: /dashboard — own transcripts, check-in button, settings
+```
+
+## Screenshots
+
+| Sign-up | Sign-in |
+| --- | --- |
+| ![Sign-up wizard](docs/screenshots/home.png) | ![OTP sign-in](docs/screenshots/login.png) |
+
 | Doc | What is in it |
 | --- | --- |
 | [DEPLOY.md](DEPLOY.md) | How a change actually reaches the Pi, rollback, drift detection |

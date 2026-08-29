@@ -196,8 +196,13 @@ func (s *Store) CreateUser(u *User) error {
 func (s *Store) UpsertUser(u *User) error {
 	existing, err := s.UserByPhone(u.Phone)
 	if err == nil {
-		_, err = s.db.Exec(`UPDATE users SET name=?, channel=?, frequency=?, ics_url=? WHERE id=?`,
-			u.Name, u.Channel, u.Frequency, nullStr(u.ICSURL), existing.ID)
+		// Empty interests mean "not answered this time", so a re-signup that
+		// skips the question keeps whatever the user already told us.
+		if strings.TrimSpace(u.Interests) == "" {
+			u.Interests = existing.Interests
+		}
+		_, err = s.db.Exec(`UPDATE users SET name=?, channel=?, frequency=?, ics_url=?, interests=? WHERE id=?`,
+			u.Name, u.Channel, u.Frequency, nullStr(u.ICSURL), u.Interests, existing.ID)
 		u.ID = existing.ID
 		return err
 	}
@@ -247,7 +252,7 @@ func (s *Store) SaveOnboarding(u *User, name, interests, frequency string) error
 	if name = strings.TrimSpace(name); name != "" {
 		u.Name = name
 	}
-	if interests = strings.TrimSpace(interests); interests != "" {
+	if interests = normaliseInterests(interests); interests != "" {
 		u.Interests = interests
 	}
 	if frequency = strings.TrimSpace(frequency); validFrequency(frequency) {
@@ -346,40 +351,26 @@ func (s *Store) RecentMessages(userID int64, limit int) ([]Message, error) {
 	return out, rows.Err()
 }
 
-// NextEventFor picks the soonest upcoming event that has never been suggested
-// to this user. When the user has stated interests it first tries events whose
-// tags match one of them, then widens to any event, then (if every upcoming
-// event has been offered already) falls back to the soonest event overall.
-// Londoners get London events first; the export is London-heavy but not pure.
-const eventOrder = `(lower(city) <> 'london'), starts_at ASC`
-
-func (s *Store) NextEventFor(userID int64, interests []string) (*Event, error) {
-	now := time.Now().UTC()
-	const base = `SELECT id, title, starts_at, city, url, tags FROM events
-		WHERE starts_at >= ? AND id NOT IN (SELECT event_id FROM suggestions WHERE user_id=?)`
-
-	if len(interests) > 0 {
-		clauses := make([]string, 0, len(interests))
-		args := []any{now, userID}
-		for _, in := range interests {
-			clauses = append(clauses, `lower(tags) LIKE ?`)
-			args = append(args, "%"+in+"%")
-		}
-		q := base + ` AND (` + strings.Join(clauses, " OR ") + `) ORDER BY ` + eventOrder + ` LIMIT 1`
-		e, err := scanEvent(s.db.QueryRow(q, args...))
-		if err == nil {
-			return e, nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
+// CandidateEvents returns upcoming events this user has not been offered yet.
+// Relevance is decided in matching.go rather than in SQL, so every suggestion
+// (and every exclusion) can explain itself.
+func (s *Store) CandidateEvents(userID int64, limit int) ([]Event, error) {
+	rows, err := s.db.Query(`SELECT id, title, starts_at, city, url, tags FROM events
+		WHERE starts_at >= ? AND id NOT IN (SELECT event_id FROM suggestions WHERE user_id=?)
+		ORDER BY starts_at ASC LIMIT ?`, time.Now().UTC(), userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Event
+	for rows.Next() {
+		var e Event
+		if err := rows.Scan(&e.ID, &e.Title, &e.StartsAt, &e.City, &e.URL, &e.Tags); err != nil {
 			return nil, err
 		}
+		out = append(out, e)
 	}
-
-	e, err := scanEvent(s.db.QueryRow(base+` ORDER BY `+eventOrder+` LIMIT 1`, now, userID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return scanEvent(s.db.QueryRow(`SELECT id, title, starts_at, city, url, tags FROM events ORDER BY ` + eventOrder + ` LIMIT 1`))
-	}
-	return e, err
+	return out, rows.Err()
 }
 
 func scanEvent(row scanner) (*Event, error) {

@@ -1,6 +1,6 @@
 {{define "index.html"}}{{template "head" .}}
 <div class="dots" id="dots">
-  <span class="dot on"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+  <span class="dot on"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span>
 </div>
 
 <div class="err" id="err" hidden></div>
@@ -35,13 +35,33 @@
 </section>
 
 <section class="step" data-step="4">
+  <h1>What should I keep an eye out for?</h1>
+  <p class="sub">Tap anything that fits. I only suggest events that match what you pick here.</p>
+  <div class="chips" id="interests" role="group" aria-label="Interests">
+    <button type="button" class="chip" data-interest="hackathons" aria-pressed="false">Hackathons</button>
+    <button type="button" class="chip" data-interest="meetups" aria-pressed="false">Meetups</button>
+    <button type="button" class="chip" data-interest="conferences" aria-pressed="false">Conferences</button>
+    <button type="button" class="chip" data-interest="workshops" aria-pressed="false">Talks &amp; workshops</button>
+    <button type="button" class="chip" data-interest="social" aria-pressed="false">Social</button>
+    <button type="button" class="chip" data-interest="ai" aria-pressed="false">AI &amp; ML</button>
+    <button type="button" class="chip" data-interest="web" aria-pressed="false">Web &amp; software</button>
+    <button type="button" class="chip" data-interest="data" aria-pressed="false">Data</button>
+    <button type="button" class="chip" data-interest="hardware" aria-pressed="false">Hardware</button>
+    <button type="button" class="chip" data-interest="startups" aria-pressed="false">Startups &amp; founders</button>
+  </div>
+  <input type="text" id="interests-other" class="big" placeholder="Anything else? e.g. rust, design, climbing">
+  <button id="interests-next">Continue</button>
+  <button class="ghost" id="interests-skip">I'd rather not say</button>
+</section>
+
+<section class="step" data-step="5">
   <h1 id="ring-title">I'll ring you now to get to know you</h1>
   <p class="sub" id="ring-sub">A quick chat about what you're into, then I'll leave you alone.</p>
   <button id="call-now">Call me now</button>
   <button class="ghost" id="call-skip">Skip for now</button>
 </section>
 
-<section class="step" data-step="5">
+<section class="step" data-step="6">
   <h1>You're in.</h1>
   <p class="sub" id="done-sub">Talk soon.</p>
   <a class="btn-link" id="journal-link" href="/journal">Open your journal</a>
@@ -51,7 +71,7 @@
 
 <script>
 (function () {
-  var state = { name: "", phone: "", channel: "sms", frequency: "daily" };
+  var state = { name: "", phone: "", channel: "sms", frequency: "daily", interests: "" };
   var steps = document.querySelectorAll(".step");
   var dots = document.querySelectorAll(".dot");
   var err = document.getElementById("err");
@@ -91,10 +111,36 @@
   });
 
   document.querySelectorAll("[data-frequency]").forEach(function (b) {
+    b.addEventListener("click", function () { state.frequency = b.dataset.frequency; show(4); });
+  });
+
+  document.querySelectorAll("[data-interest]").forEach(function (b) {
     b.addEventListener("click", function () {
-      state.frequency = b.dataset.frequency;
-      signup();
+      var on = b.classList.toggle("on");
+      b.setAttribute("aria-pressed", on ? "true" : "false");
     });
+  });
+
+  // Chips plus the free-text box become one comma-separated string, which is
+  // exactly the shape the voice agent's save_onboarding tool writes too.
+  function collectInterests() {
+    var picked = [];
+    document.querySelectorAll("[data-interest].on").forEach(function (b) { picked.push(b.dataset.interest); });
+    document.getElementById("interests-other").value.split(",").forEach(function (s) {
+      s = s.trim();
+      if (s) { picked.push(s); }
+    });
+    return picked.join(", ");
+  }
+
+  document.getElementById("interests-next").addEventListener("click", function () {
+    state.interests = collectInterests();
+    if (!state.interests) { return fail("Pick at least one, or tap \u201cI'd rather not say\u201d."); }
+    signup();
+  });
+  document.getElementById("interests-skip").addEventListener("click", function () {
+    state.interests = "";
+    signup();
   });
 
   function signup() {
@@ -107,11 +153,11 @@
       if (!j.ok) { return fail(j.error || "Something went wrong."); }
       document.getElementById("journal-link").href = j.journal;
       if (state.channel === "call") {
-        show(4);
+        show(5);
       } else {
         document.getElementById("done-sub").textContent =
           "Check your phone - I've texted " + state.phone + ". Reply to it and your first check-in starts.";
-        show(5);
+        show(6);
       }
     }).catch(function () { fail("Could not reach the server."); });
   }
@@ -125,13 +171,13 @@
       btn.textContent = "Call me now";
       if (!j.ok) { return fail(j.error || "Could not place the call."); }
       document.getElementById("done-sub").textContent = "Pick up - I'm calling " + state.phone + " now.";
-      show(5);
+      show(6);
     });
   });
 
   document.getElementById("call-skip").addEventListener("click", function () {
     document.getElementById("done-sub").textContent = "I'll ring " + state.phone + " at your next check-in.";
-    show(5);
+    show(6);
   });
 
   document.getElementById("simulate").addEventListener("click", function () {

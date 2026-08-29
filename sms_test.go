@@ -306,13 +306,22 @@ func TestSuggestEventPrefersStatedInterests(t *testing.T) {
 	if err := store.SaveOnboarding(u, "", "hackathons", ""); err != nil {
 		t.Fatalf("save onboarding: %v", err)
 	}
+	// The committed export has no London hackathon with a registration URL, so
+	// seed one rather than depending on whatever the live data happens to hold.
+	extra := "title,starts_at,city,url,tags\nLondon Autumn Hackathon,2099-01-02 09:00:00+00,London,https://example.com/hack,non_uni_hackathon\n"
+	if err := store.SeedEvents(NewCSVEventSource("extra.csv", []byte(extra)), false); err != nil {
+		t.Fatalf("seed extra: %v", err)
+	}
 
-	ev, err := srv.brain.SuggestEvent(u)
+	match, err := srv.brain.SuggestEvent(u)
 	if err != nil {
 		t.Fatalf("suggest: %v", err)
 	}
-	if !strings.Contains(strings.ToLower(ev.Tags), "hackathon") {
-		t.Fatalf("want a hackathon-tagged event, got %q tagged %q", ev.Title, ev.Tags)
+	if !strings.Contains(strings.ToLower(match.Event.Tags), "hackathon") {
+		t.Fatalf("want a hackathon-tagged event, got %q tagged %q", match.Event.Title, match.Event.Tags)
+	}
+	if match.Why() == "" {
+		t.Fatalf("suggestion should explain itself")
 	}
 }
 
@@ -597,5 +606,19 @@ func TestWizardAsksForNameFirst(t *testing.T) {
 	}
 	if name > phone {
 		t.Errorf("name step should come before the phone step")
+	}
+}
+
+// The onboarding flow has to ask about interests: they are the only input the
+// recommendation engine is allowed to act on.
+func TestWizardAsksForInterests(t *testing.T) {
+	srv, _, _, _ := newTestServer(t, nil)
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := rec.Body.String()
+	for _, want := range []string{`data-interest="hackathons"`, `data-interest="meetups"`, `data-interest="conferences"`, `data-interest="social"`, `data-interest="ai"`, "interests-other", "interests-skip"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("interests step missing %q", want)
+		}
 	}
 }

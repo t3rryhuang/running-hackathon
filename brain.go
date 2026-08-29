@@ -3,11 +3,21 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
 	"time"
 )
+
+// noMatchLine is what the agent should say when nothing clears the relevance
+// bar: honest, and it asks for the detail that would fix it.
+func noMatchLine(u *User) string {
+	if strings.TrimSpace(u.Interests) == "" {
+		return "I haven't got anything worth recommending right now - what kind of thing would you actually want to go to?"
+	}
+	return "Nothing in my list is a good fit for you at the moment, so I'd rather not push something random. Want me to widen it beyond " + u.Interests + "?"
+}
 
 const systemPrompt = `You are CheckIn, a warm, grounded journalling companion that talks to people over SMS.
 
@@ -23,8 +33,9 @@ What you do:
 - If they sound low (mood 1-2), or their calendar is empty and they seem at a loose end, call suggest_event ONCE to fetch a real London tech event, then offer it in a single friendly sentence and ask if you should put their name down. Never offer more than one event at a time, and never re-offer if a suggestion is already open.
 - If there is an open suggestion and they say yes / go on / sign me up, call accept_suggestion and confirm warmly that they are on the list.
 - If they decline, drop it gracefully and do not bring it up again this conversation.
+- If suggest_event comes back with no_match, say so honestly in your own words using the "say" line as a guide, and ask what they would actually turn up to. Never fall back to an event you were not given.
 
-Never invent events - only mention events returned by suggest_event.`
+Never invent events - only mention events returned by suggest_event. Do not guess anything about the person that they have not told you: no assumptions about gender, background or eligibility.`
 
 var brainTools = []ToolDef{
 	{
@@ -213,11 +224,19 @@ func (b *Brain) runTool(u *User, name string, input json.RawMessage) string {
 		return jsonStr(map[string]any{"ok": true})
 
 	case "suggest_event":
-		ev, err := b.SuggestEvent(u)
+		match, err := b.SuggestEvent(u)
 		if err != nil {
+			if errors.Is(err, ErrNoMatch) {
+				return jsonStr(map[string]any{
+					"ok":       false,
+					"no_match": true,
+					"say":      noMatchLine(u),
+				})
+			}
 			return jsonStr(map[string]any{"ok": false, "error": "no events available"})
 		}
-		return jsonStr(map[string]any{"ok": true, "event": map[string]any{
+		ev := match.Event
+		return jsonStr(map[string]any{"ok": true, "why": match.Why(), "event": map[string]any{
 			"title":     ev.Title,
 			"starts_at": ev.StartsAt.In(londonLoc).Format(time.RFC3339),
 			"when":      ev.StartsAt.In(londonLoc).Format("Mon 2 Jan, 15:04"),
@@ -263,17 +282,28 @@ func (b *Brain) SaveCheckin(u *User, mood *int, summary, topics, raw string) err
 	})
 }
 
-// SuggestEvent picks the soonest event not yet offered to this user and records
-// it as an open suggestion.
-func (b *Brain) SuggestEvent(u *User) (*Event, error) {
-	ev, err := b.store.NextEventFor(u.ID, u.InterestList())
+// candidateLimit bounds how much of the events table the matcher scores per
+// suggestion. The export is a few hundred rows, so this covers all of it.
+const candidateLimit = 1000
+
+// SuggestEvent returns the best-justified event for this user and records it as
+// an open suggestion. It returns ErrNoMatch when nothing clears the relevance
+// and eligibility rules, so callers can say "nothing good right now" instead of
+// offering something the user shouldn't be sent.
+func (b *Brain) SuggestEvent(u *User) (*EventMatch, error) {
+	candidates, err := b.store.CandidateEvents(u.ID, candidateLimit)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := b.store.AddSuggestion(u.ID, ev.ID); err != nil {
+	match, err := MatchEvent(u, candidates, time.Now())
+	if err != nil {
 		return nil, err
 	}
-	return ev, nil
+	if _, err := b.store.AddSuggestion(u.ID, match.Event.ID); err != nil {
+		return nil, err
+	}
+	log.Printf("suggest: %s -> %q (score %d: %s)", u.Phone, match.Event.Title, match.Score, match.Why())
+	return match, nil
 }
 
 // AcceptSuggestion marks the open suggestion accepted and returns a human

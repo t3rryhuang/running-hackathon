@@ -7,6 +7,7 @@ import (
 	"embed"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -124,6 +125,7 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		Channel:   channel,
 		Frequency: frequency,
 		ICSURL:    strings.TrimSpace(r.FormValue("ics_url")),
+		Interests: normaliseInterests(r.FormValue("interests")),
 	}
 	if err := s.store.UpsertUser(u); err != nil {
 		log.Printf("signup: %v", err)
@@ -156,6 +158,7 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 			"name":      u.Name,
 			"channel":   channel,
 			"frequency": frequency,
+			"interests": u.Interests,
 			"journal":   "/journal?phone=" + url.QueryEscape(phone),
 		})
 		return
@@ -528,15 +531,27 @@ func (s *Server) toolSuggestEvent(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	ev, err := s.brain.SuggestEvent(u)
+	match, err := s.brain.SuggestEvent(u)
 	if err != nil {
+		if errors.Is(err, ErrNoMatch) {
+			// Explicitly not an error the agent should paper over: it is told
+			// what to say instead of being left to improvise an event.
+			writeJSON(w, http.StatusOK, map[string]any{
+				"event":                nil,
+				"no_match":             true,
+				"say":                  noMatchLine(u),
+				"instruction_to_agent": "There is no suitable event. Say so honestly and ask what they would want to go to. Do not invent an event.",
+			})
+			return
+		}
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": "no events available"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"event": map[string]any{
-		"title":     ev.Title,
-		"starts_at": ev.StartsAt.In(londonLoc).Format(time.RFC3339),
-		"url":       ev.URL,
+	writeJSON(w, http.StatusOK, map[string]any{"why": match.Why(), "event": map[string]any{
+		"title":     match.Event.Title,
+		"starts_at": match.Event.StartsAt.In(londonLoc).Format(time.RFC3339),
+		"city":      match.Event.City,
+		"url":       match.Event.URL,
 	}})
 }
 

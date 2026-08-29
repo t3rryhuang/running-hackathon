@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"log"
 	"net/http"
 	"os"
@@ -12,6 +13,9 @@ import (
 )
 
 func main() {
+	reseed := flag.Bool("reseed", false, "reload events from the CSV export, dropping stale rows that nobody was offered")
+	flag.Parse()
+
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetPrefix("checkin ")
 
@@ -22,7 +26,7 @@ func main() {
 		log.Fatalf("open store %s: %v", cfg.DatabasePath, err)
 	}
 	defer store.Close()
-	if err := store.SeedEvents(eventsCSV); err != nil {
+	if err := store.SeedEvents(NewCSVEventSource("events_live.csv", eventsCSV), *reseed); err != nil {
 		log.Printf("seed events: %v", err)
 	}
 
@@ -34,8 +38,7 @@ func main() {
 		log.Printf("anthropic: no key, /sms will use the canned fallback reply")
 	}
 	brain := NewBrain(store, cal, brainClient, cfg.AnthropicModel, cfg.GCalICSURL)
-	tel := NewTelephony(cfg)
-	srv := NewServer(cfg, store, brain, tel, cal)
+	srv := NewServer(cfg, store, brain, NewTelephony(cfg), NewVoice(cfg), cal)
 
 	stop := make(chan struct{})
 	go NewScheduler(srv, store).Run(stop)

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -34,10 +35,9 @@ func (f *fakeAnthropic) CreateMessage(_ context.Context, req AnthropicRequest) (
 	return &resp, nil
 }
 
-// recordedSMS is a Telephony stub that captures outbound traffic.
+// recordedSMS is a Telephony stub that captures outbound texts.
 type recordedSMS struct {
-	sms   []string
-	calls []string
+	sms []string
 }
 
 func (r *recordedSMS) SendSMS(to, body string) error {
@@ -45,25 +45,35 @@ func (r *recordedSMS) SendSMS(to, body string) error {
 	return nil
 }
 
-func (r *recordedSMS) StartCall(to string) error {
+// recordedVoice is a Voice stub that captures outbound agent calls.
+type recordedVoice struct {
+	calls []string
+	err   error
+}
+
+func (r *recordedVoice) Call(to string) error {
+	if r.err != nil {
+		return r.err
+	}
 	r.calls = append(r.calls, to)
 	return nil
 }
 
-func newTestServer(t *testing.T, client AnthropicClient) (*Server, *Store, *recordedSMS) {
+func newTestServer(t *testing.T, client AnthropicClient) (*Server, *Store, *recordedSMS, *recordedVoice) {
 	t.Helper()
 	store, err := OpenStore(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
-	if err := store.SeedEvents(eventsCSV); err != nil {
+	if err := store.SeedEvents(NewCSVEventSource("events_live.csv", eventsCSV), false); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	cfg := Config{ToolWebhookSecret: "s3cret", AnthropicModel: "claude-sonnet-5"}
 	tel := &recordedSMS{}
+	voice := &recordedVoice{}
 	brain := NewBrain(store, NewCalendar(), client, cfg.AnthropicModel, "")
-	return NewServer(cfg, store, brain, tel, NewCalendar()), store, tel
+	return NewServer(cfg, store, brain, tel, voice, NewCalendar()), store, tel, voice
 }
 
 func postSMS(t *testing.T, srv *Server, from, body string) *httptest.ResponseRecorder {
@@ -80,7 +90,7 @@ func TestSMSWebhookRepliesWithTwiMLAndRemembersUser(t *testing.T) {
 	fake := &fakeAnthropic{responses: []AnthropicResponse{
 		{Content: []ContentBlock{textBlock("Glad you made it out. What was the best part?")}},
 	}}
-	srv, store, _ := newTestServer(t, fake)
+	srv, store, _, _ := newTestServer(t, fake)
 
 	rec := postSMS(t, srv, "+447700900123", "went for a run today")
 	if rec.Code != http.StatusOK {
@@ -123,7 +133,7 @@ func TestSMSToolLoopSavesCheckinAndOffersEvent(t *testing.T) {
 		}},
 		{Content: []ContentBlock{textBlock("Sounds draining. There's a hack night on Wednesday - want me to put your name down?")}},
 	}}
-	srv, store, _ := newTestServer(t, fake)
+	srv, store, _, _ := newTestServer(t, fake)
 
 	rec := postSMS(t, srv, "+447700900124", "everything broke today")
 	if rec.Code != http.StatusOK {
@@ -164,7 +174,7 @@ func TestSMSToolLoopSavesCheckinAndOffersEvent(t *testing.T) {
 }
 
 func TestSMSDegradesGracefullyWithoutAnthropic(t *testing.T) {
-	srv, _, _ := newTestServer(t, nil) // no API key configured
+	srv, _, _, _ := newTestServer(t, nil) // no API key configured
 	rec := postSMS(t, srv, "+447700900125", "hello?")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("must not 500 without a model, got %d", rec.Code)
@@ -175,7 +185,7 @@ func TestSMSDegradesGracefullyWithoutAnthropic(t *testing.T) {
 }
 
 func TestSMSDegradesGracefullyOnModelError(t *testing.T) {
-	srv, _, _ := newTestServer(t, &fakeAnthropic{err: os.ErrDeadlineExceeded})
+	srv, _, _, _ := newTestServer(t, &fakeAnthropic{err: os.ErrDeadlineExceeded})
 	rec := postSMS(t, srv, "+447700900126", "hi")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("must not 500 when the model errors, got %d", rec.Code)
@@ -186,8 +196,8 @@ func TestSMSDegradesGracefullyOnModelError(t *testing.T) {
 }
 
 func TestToolWebhooksRequireSecret(t *testing.T) {
-	srv, _, _ := newTestServer(t, nil)
-	for _, path := range []string{"/tools/get_context", "/tools/save_checkin", "/tools/suggest_event", "/tools/accept_suggestion"} {
+	srv, _, _, _ := newTestServer(t, nil)
+	for _, path := range []string{"/tools/get_context", "/tools/save_onboarding", "/tools/save_checkin", "/tools/suggest_event", "/tools/accept_suggestion"} {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"phone":"+447700900127"}`))
 		rec := httptest.NewRecorder()
 		srv.Routes().ServeHTTP(rec, req)
@@ -198,7 +208,7 @@ func TestToolWebhooksRequireSecret(t *testing.T) {
 }
 
 func TestToolGetContextReturnsMemory(t *testing.T) {
-	srv, store, _ := newTestServer(t, nil)
+	srv, store, _, _ := newTestServer(t, nil)
 	u, _ := store.EnsureUser("+447700900128")
 	mood := 4
 	_ = store.AddCheckin(&Checkin{UserID: u.ID, Mood: &mood, Summary: "Good run", Topics: "running"})
@@ -211,6 +221,8 @@ func TestToolGetContextReturnsMemory(t *testing.T) {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
 	var out struct {
+		Onboarded    bool   `json:"onboarded"`
+		Interests    string `json:"interests"`
 		LastCheckins []struct {
 			Summary string `json:"summary"`
 		} `json:"last_checkins"`
@@ -221,10 +233,174 @@ func TestToolGetContextReturnsMemory(t *testing.T) {
 	if len(out.LastCheckins) != 1 || out.LastCheckins[0].Summary != "Good run" {
 		t.Fatalf("unexpected context: %s", rec.Body.String())
 	}
+	if out.Onboarded {
+		t.Errorf("a user the agent has never interviewed must report onboarded=false")
+	}
+}
+
+// The voice agent interviews new callers, then posts what it learned; the next
+// get_context must show the user as onboarded so it skips the interview.
+func TestToolSaveOnboardingMarksUserOnboarded(t *testing.T) {
+	srv, store, _, _ := newTestServer(t, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/tools/save_onboarding",
+		strings.NewReader(`{"phone":"+447700900140","name":"Joseph","interests":"hackathons, meetups","frequency":"weekdays"}`))
+	req.Header.Set("X-Webhook-Secret", "s3cret")
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+
+	u, err := store.UserByPhone("+447700900140")
+	if err != nil {
+		t.Fatalf("user not created: %v", err)
+	}
+	if u.Name != "Joseph" || u.Interests != "hackathons, meetups" || u.Frequency != "weekdays" {
+		t.Fatalf("onboarding not stored: %#v", u)
+	}
+	if !u.Onboarded() {
+		t.Fatalf("onboarded_at should be stamped")
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/tools/get_context", strings.NewReader(`{"phone":"+447700900140"}`))
+	req.Header.Set("X-Webhook-Secret", "s3cret")
+	rec = httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+	var out struct {
+		Onboarded bool   `json:"onboarded"`
+		Interests string `json:"interests"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if !out.Onboarded || out.Interests != "hackathons, meetups" {
+		t.Fatalf("context should reflect the interview: %s", rec.Body.String())
+	}
+}
+
+func TestSuggestEventPrefersStatedInterests(t *testing.T) {
+	srv, store, _, _ := newTestServer(t, nil)
+	u, _ := store.EnsureUser("+447700900141")
+	if err := store.SaveOnboarding(u, "", "hackathons", ""); err != nil {
+		t.Fatalf("save onboarding: %v", err)
+	}
+
+	ev, err := srv.brain.SuggestEvent(u)
+	if err != nil {
+		t.Fatalf("suggest: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(ev.Tags), "hackathon") {
+		t.Fatalf("want a hackathon-tagged event, got %q tagged %q", ev.Title, ev.Tags)
+	}
+}
+
+func TestCallEndpointRingsThroughVoice(t *testing.T) {
+	srv, _, _, voice := newTestServer(t, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/call", strings.NewReader(`{"phone":"+447700900142"}`))
+	req.Header.Set("content-type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(voice.calls) != 1 || voice.calls[0] != "+447700900142" {
+		t.Fatalf("call not placed: %#v", voice.calls)
+	}
+
+	rec = httptest.NewRecorder()
+	bad := httptest.NewRequest(http.MethodPost, "/call", strings.NewReader(`{"phone":"07700900142"}`))
+	bad.Header.Set("content-type", "application/json")
+	srv.Routes().ServeHTTP(rec, bad)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("non-E.164 should 400, got %d", rec.Code)
+	}
+}
+
+// The ElevenLabs request is asserted rather than sent: no key on this box.
+func TestElevenLabsOutboundRequestShape(t *testing.T) {
+	v := NewVoice(Config{ElevenLabsAPIKey: "key-123", ElevenLabsAgentID: "agent_abc", ElevenLabsPhoneID: "phnum_xyz"})
+	el, ok := v.(*elevenLabsVoice)
+	if !ok {
+		t.Fatalf("want a live ElevenLabs caller, got %T", v)
+	}
+	req, err := el.newRequest("+447700900143")
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	if req.URL.String() != elevenLabsOutboundURL {
+		t.Errorf("url: %s", req.URL)
+	}
+	if got := req.Header.Get("xi-api-key"); got != "key-123" {
+		t.Errorf("xi-api-key: %q", got)
+	}
+	body, _ := io.ReadAll(req.Body)
+	var sent outboundCallRequest
+	if err := json.Unmarshal(body, &sent); err != nil {
+		t.Fatalf("bad body %s: %v", body, err)
+	}
+	want := outboundCallRequest{AgentID: "agent_abc", AgentPhoneNumberID: "phnum_xyz", ToNumber: "+447700900143"}
+	if sent != want {
+		t.Fatalf("body = %#v, want %#v", sent, want)
+	}
+
+	if _, ok := NewVoice(Config{ElevenLabsAPIKey: "key-123"}).(logVoice); !ok {
+		t.Errorf("missing agent/phone ids should fall back to the logging stub")
+	}
+}
+
+func TestSettingsChangesFrequency(t *testing.T) {
+	srv, store, _, _ := newTestServer(t, nil)
+	_, _ = store.EnsureUser("+447700900144")
+
+	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(`{"phone":"+447700900144","frequency":"twice-daily"}`))
+	req.Header.Set("content-type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	u, _ := store.UserByPhone("+447700900144")
+	if u.Frequency != "twice-daily" {
+		t.Fatalf("frequency not saved: %q", u.Frequency)
+	}
+
+	rec = httptest.NewRecorder()
+	bad := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(`{"phone":"+447700900144","frequency":"hourly"}`))
+	bad.Header.Set("content-type", "application/json")
+	srv.Routes().ServeHTTP(rec, bad)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown frequency should 400, got %d", rec.Code)
+	}
+}
+
+// The wizard posts the same form but wants JSON back so it can drive the last
+// two steps client-side.
+func TestSignupReturnsJSONForWizard(t *testing.T) {
+	srv, _, _, _ := newTestServer(t, nil)
+	form := url.Values{"phone": {"+447700900145"}, "channel": {"call"}, "frequency": {"daily"}}
+	req := httptest.NewRequest(http.MethodPost, "/signup", strings.NewReader(form.Encode()))
+	req.Header.Set("content-type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+
+	var out struct {
+		OK      bool   `json:"ok"`
+		Channel string `json:"channel"`
+		Journal string `json:"journal"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("bad json %s: %v", rec.Body.String(), err)
+	}
+	if !out.OK || out.Channel != "call" || !strings.Contains(out.Journal, "%2B447700900145") {
+		t.Fatalf("unexpected signup json: %s", rec.Body.String())
+	}
 }
 
 func TestSignupCreatesUserAndSendsWelcomeSMS(t *testing.T) {
-	srv, store, tel := newTestServer(t, nil)
+	srv, store, tel, _ := newTestServer(t, nil)
 	form := url.Values{"phone": {"+44 7700 900129"}, "channel": {"sms"}, "frequency": {"weekdays"}, "name": {"Keanu"}}
 	req := httptest.NewRequest(http.MethodPost, "/signup", strings.NewReader(form.Encode()))
 	req.Header.Set("content-type", "application/x-www-form-urlencoded")
@@ -247,7 +423,7 @@ func TestSignupCreatesUserAndSendsWelcomeSMS(t *testing.T) {
 }
 
 func TestSignupRejectsNonE164(t *testing.T) {
-	srv, _, _ := newTestServer(t, nil)
+	srv, _, _, _ := newTestServer(t, nil)
 	form := url.Values{"phone": {"07700900130"}, "channel": {"sms"}}
 	req := httptest.NewRequest(http.MethodPost, "/signup", strings.NewReader(form.Encode()))
 	req.Header.Set("content-type", "application/x-www-form-urlencoded")
@@ -259,7 +435,7 @@ func TestSignupRejectsNonE164(t *testing.T) {
 }
 
 func TestTriggerSendsOpeningMessageOrCall(t *testing.T) {
-	srv, store, tel := newTestServer(t, nil)
+	srv, store, tel, voice := newTestServer(t, nil)
 	_ = store.CreateUser(&User{Phone: "+447700900131", Name: "Sam", Channel: "sms", Frequency: "daily"})
 	_ = store.CreateUser(&User{Phone: "+447700900132", Channel: "call", Frequency: "daily"})
 
@@ -273,8 +449,8 @@ func TestTriggerSendsOpeningMessageOrCall(t *testing.T) {
 	if len(tel.sms) != 1 || !strings.Contains(tel.sms[0], "Hey Sam") {
 		t.Fatalf("sms trigger: %#v", tel.sms)
 	}
-	if len(tel.calls) != 1 {
-		t.Fatalf("call trigger: %#v", tel.calls)
+	if len(voice.calls) != 1 || voice.calls[0] != "+447700900132" {
+		t.Fatalf("call trigger should go through ElevenLabs: %#v", voice.calls)
 	}
 	u, _ := store.UserByPhone("+447700900131")
 	if u.LastTriggeredAt == nil {
@@ -283,7 +459,7 @@ func TestTriggerSendsOpeningMessageOrCall(t *testing.T) {
 }
 
 func TestJournalPageListsCheckins(t *testing.T) {
-	srv, store, _ := newTestServer(t, nil)
+	srv, store, _, _ := newTestServer(t, nil)
 	u, _ := store.EnsureUser("+447700900133")
 	_ = store.AddCheckin(&Checkin{UserID: u.ID, Summary: "Shipped the webhook", Topics: "work"})
 

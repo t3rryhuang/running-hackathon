@@ -2,7 +2,6 @@ package main
 
 import (
 	"database/sql"
-	"encoding/csv"
 	"errors"
 	"log"
 	"strings"
@@ -19,6 +18,8 @@ CREATE TABLE IF NOT EXISTS users (
 	channel TEXT NOT NULL DEFAULT 'sms' CHECK (channel IN ('call','sms')),
 	frequency TEXT NOT NULL DEFAULT 'daily',
 	ics_url TEXT,
+	interests TEXT NOT NULL DEFAULT '',
+	onboarded_at DATETIME,
 	last_triggered_at DATETIME,
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -53,7 +54,15 @@ CREATE TABLE IF NOT EXISTS messages (
 	body TEXT NOT NULL,
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE UNIQUE INDEX IF NOT EXISTS events_unique ON events (title, starts_at);
 `
+
+// migrations are applied after the schema so databases created by earlier
+// versions gain new columns instead of needing a wipe.
+var migrations = []string{
+	`ALTER TABLE users ADD COLUMN interests TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE users ADD COLUMN onboarded_at DATETIME`,
+}
 
 type User struct {
 	ID              int64
@@ -62,8 +71,35 @@ type User struct {
 	Channel         string
 	Frequency       string
 	ICSURL          string
+	Interests       string
+	OnboardedAt     *time.Time
 	LastTriggeredAt *time.Time
 	CreatedAt       time.Time
+}
+
+// Onboarded reports whether the voice agent has already interviewed this user.
+func (u *User) Onboarded() bool { return u.OnboardedAt != nil }
+
+// InterestList splits the comma-separated interests into trimmed values.
+func (u *User) InterestList() []string {
+	var out []string
+	for _, s := range strings.Split(u.Interests, ",") {
+		if s = interestStem(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// interestStem reduces a spoken interest ("Hackathons") to something that
+// matches the export's tag vocabulary ("non_uni_hackathon", "meetups").
+func interestStem(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.Trim(s, ".!?")
+	if len(s) > 4 && strings.HasSuffix(s, "s") {
+		s = strings.TrimSuffix(s, "s")
+	}
+	return s
 }
 
 type Checkin struct {
@@ -105,21 +141,35 @@ func OpenStore(path string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		return nil, err
 	}
+	for _, m := range migrations {
+		// Re-running an applied migration errors with "duplicate column";
+		// that is the expected steady state, so it is not fatal.
+		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return nil, err
+		}
+	}
 	return &Store{db: db}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
 
+const userSelect = `SELECT id, phone, name, channel, frequency, COALESCE(ics_url,''), COALESCE(interests,''), onboarded_at, last_triggered_at, created_at FROM users`
+
+type scanner interface{ Scan(dest ...any) error }
+
 func (s *Store) UserByPhone(phone string) (*User, error) {
-	row := s.db.QueryRow(`SELECT id, phone, name, channel, frequency, COALESCE(ics_url,''), last_triggered_at, created_at FROM users WHERE phone = ?`, phone)
-	return scanUser(row)
+	return scanUser(s.db.QueryRow(userSelect+` WHERE phone = ?`, phone))
 }
 
-func scanUser(row *sql.Row) (*User, error) {
+func scanUser(row scanner) (*User, error) {
 	var u User
-	var last sql.NullTime
-	if err := row.Scan(&u.ID, &u.Phone, &u.Name, &u.Channel, &u.Frequency, &u.ICSURL, &last, &u.CreatedAt); err != nil {
+	var onboarded, last sql.NullTime
+	if err := row.Scan(&u.ID, &u.Phone, &u.Name, &u.Channel, &u.Frequency, &u.ICSURL, &u.Interests, &onboarded, &last, &u.CreatedAt); err != nil {
 		return nil, err
+	}
+	if onboarded.Valid {
+		t := onboarded.Time
+		u.OnboardedAt = &t
 	}
 	if last.Valid {
 		t := last.Time
@@ -129,8 +179,8 @@ func scanUser(row *sql.Row) (*User, error) {
 }
 
 func (s *Store) CreateUser(u *User) error {
-	res, err := s.db.Exec(`INSERT INTO users (phone, name, channel, frequency, ics_url) VALUES (?,?,?,?,?)`,
-		u.Phone, u.Name, u.Channel, u.Frequency, nullStr(u.ICSURL))
+	res, err := s.db.Exec(`INSERT INTO users (phone, name, channel, frequency, ics_url, interests) VALUES (?,?,?,?,?,?)`,
+		u.Phone, u.Name, u.Channel, u.Frequency, nullStr(u.ICSURL), u.Interests)
 	if err != nil {
 		return err
 	}
@@ -172,25 +222,52 @@ func (s *Store) EnsureUser(phone string) (*User, error) {
 }
 
 func (s *Store) AllUsers() ([]User, error) {
-	rows, err := s.db.Query(`SELECT id, phone, name, channel, frequency, COALESCE(ics_url,''), last_triggered_at, created_at FROM users ORDER BY id`)
+	rows, err := s.db.Query(userSelect + ` ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []User
 	for rows.Next() {
-		var u User
-		var last sql.NullTime
-		if err := rows.Scan(&u.ID, &u.Phone, &u.Name, &u.Channel, &u.Frequency, &u.ICSURL, &last, &u.CreatedAt); err != nil {
+		u, err := scanUser(rows)
+		if err != nil {
 			return nil, err
 		}
-		if last.Valid {
-			t := last.Time
-			u.LastTriggeredAt = &t
-		}
-		out = append(out, u)
+		out = append(out, *u)
 	}
 	return out, rows.Err()
+}
+
+// SaveOnboarding records what the voice agent learned during the onboarding
+// interview and stamps the user as onboarded.
+func (s *Store) SaveOnboarding(u *User, name, interests, frequency string) error {
+	if name = strings.TrimSpace(name); name != "" {
+		u.Name = name
+	}
+	if interests = strings.TrimSpace(interests); interests != "" {
+		u.Interests = interests
+	}
+	if frequency = strings.TrimSpace(frequency); validFrequency(frequency) {
+		u.Frequency = frequency
+	}
+	now := time.Now().UTC()
+	u.OnboardedAt = &now
+	_, err := s.db.Exec(`UPDATE users SET name=?, interests=?, frequency=?, onboarded_at=? WHERE id=?`,
+		u.Name, u.Interests, u.Frequency, now, u.ID)
+	return err
+}
+
+func (s *Store) SetFrequency(userID int64, frequency string) error {
+	_, err := s.db.Exec(`UPDATE users SET frequency=? WHERE id=?`, frequency, userID)
+	return err
+}
+
+func validFrequency(f string) bool {
+	switch f {
+	case "daily", "twice-daily", "weekdays":
+		return true
+	}
+	return false
 }
 
 func (s *Store) MarkTriggered(userID int64, at time.Time) error {
@@ -259,22 +336,43 @@ func (s *Store) RecentMessages(userID int64, limit int) ([]Message, error) {
 	return out, rows.Err()
 }
 
-// NextEventFor picks the soonest upcoming event that has never been suggested to
-// this user, falling back to the soonest event overall when all have been used.
-func (s *Store) NextEventFor(userID int64) (*Event, error) {
+// NextEventFor picks the soonest upcoming event that has never been suggested
+// to this user. When the user has stated interests it first tries events whose
+// tags match one of them, then widens to any event, then (if every upcoming
+// event has been offered already) falls back to the soonest event overall.
+// Londoners get London events first; the export is London-heavy but not pure.
+const eventOrder = `(lower(city) <> 'london'), starts_at ASC`
+
+func (s *Store) NextEventFor(userID int64, interests []string) (*Event, error) {
 	now := time.Now().UTC()
-	row := s.db.QueryRow(`SELECT id, title, starts_at, city, url, tags FROM events
-		WHERE starts_at >= ? AND id NOT IN (SELECT event_id FROM suggestions WHERE user_id=?)
-		ORDER BY starts_at ASC LIMIT 1`, now, userID)
-	e, err := scanEvent(row)
+	const base = `SELECT id, title, starts_at, city, url, tags FROM events
+		WHERE starts_at >= ? AND id NOT IN (SELECT event_id FROM suggestions WHERE user_id=?)`
+
+	if len(interests) > 0 {
+		clauses := make([]string, 0, len(interests))
+		args := []any{now, userID}
+		for _, in := range interests {
+			clauses = append(clauses, `lower(tags) LIKE ?`)
+			args = append(args, "%"+in+"%")
+		}
+		q := base + ` AND (` + strings.Join(clauses, " OR ") + `) ORDER BY ` + eventOrder + ` LIMIT 1`
+		e, err := scanEvent(s.db.QueryRow(q, args...))
+		if err == nil {
+			return e, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+	}
+
+	e, err := scanEvent(s.db.QueryRow(base+` ORDER BY `+eventOrder+` LIMIT 1`, now, userID))
 	if errors.Is(err, sql.ErrNoRows) {
-		row = s.db.QueryRow(`SELECT id, title, starts_at, city, url, tags FROM events ORDER BY starts_at ASC LIMIT 1`)
-		return scanEvent(row)
+		return scanEvent(s.db.QueryRow(`SELECT id, title, starts_at, city, url, tags FROM events ORDER BY ` + eventOrder + ` LIMIT 1`))
 	}
 	return e, err
 }
 
-func scanEvent(row *sql.Row) (*Event, error) {
+func scanEvent(row scanner) (*Event, error) {
 	var e Event
 	if err := row.Scan(&e.ID, &e.Title, &e.StartsAt, &e.City, &e.URL, &e.Tags); err != nil {
 		return nil, err
@@ -335,45 +433,43 @@ func (s *Store) countEvents() (int, error) {
 	return n, err
 }
 
-// SeedEvents loads events.csv into the events table when the table is empty.
-// CSV columns: title,starts_at (RFC3339),city,url,tags
-func (s *Store) SeedEvents(csvBytes []byte) error {
-	n, err := s.countEvents()
-	if err != nil || n > 0 {
-		return err
-	}
-	r := csv.NewReader(strings.NewReader(string(csvBytes)))
-	records, err := r.ReadAll()
+// SeedEvents loads events from src into the events table. It is a no-op when the
+// stored count already matches the source, so a redeploy with a fresh export
+// picks the new rows up automatically; force wipes unreferenced rows first so a
+// shrinking export can drop stale events without orphaning suggestions.
+func (s *Store) SeedEvents(src EventSource, force bool) error {
+	records, err := src.Events()
 	if err != nil {
 		return err
+	}
+	have, err := s.countEvents()
+	if err != nil {
+		return err
+	}
+	if have == len(records) && !force {
+		return nil
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	for i, rec := range records {
-		if i == 0 && strings.EqualFold(strings.TrimSpace(rec[0]), "title") {
-			continue
+	if force {
+		if _, err := tx.Exec(`DELETE FROM events WHERE id NOT IN (SELECT event_id FROM suggestions)`); err != nil {
+			return err
 		}
-		if len(rec) < 5 {
-			continue
-		}
-		t, err := time.Parse(time.RFC3339, strings.TrimSpace(rec[1]))
-		if err != nil {
-			log.Printf("seed: skipping %q: bad starts_at %q", rec[0], rec[1])
-			continue
-		}
-		if _, err := tx.Exec(`INSERT INTO events (title, starts_at, city, url, tags) VALUES (?,?,?,?,?)`,
-			rec[0], t.UTC(), rec[2], rec[3], rec[4]); err != nil {
+	}
+	for _, e := range records {
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO events (title, starts_at, city, url, tags) VALUES (?,?,?,?,?)`,
+			e.Title, e.StartsAt.UTC(), e.City, e.URL, e.Tags); err != nil {
 			return err
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	n, _ = s.countEvents()
-	log.Printf("seed: loaded %d events", n)
+	n, _ := s.countEvents()
+	log.Printf("seed: %s -> %d events in db", src.Name(), n)
 	return nil
 }
 

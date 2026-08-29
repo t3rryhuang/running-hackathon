@@ -10,15 +10,11 @@ import (
 	"time"
 )
 
-// TODO(operator): point this at the ElevenLabs-provided TwiML / inbound URL for
-// the CheckIn agent once the phone integration is wired up.
-const elevenLabsTwiMLURL = "https://api.us.elevenlabs.io/twilio/inbound_call"
-
-// Telephony is the seam for outbound SMS and calls so tests (and a Twilio-less
-// dev box) never hit the network.
+// Telephony is the seam for outbound SMS so tests (and a Twilio-less dev box)
+// never hit the network. Voice calls go through ElevenLabs, not Twilio's REST
+// API - see voice.go.
 type Telephony interface {
 	SendSMS(to, body string) error
-	StartCall(to string) error
 }
 
 type twilioClient struct {
@@ -48,11 +44,6 @@ func (t *twilioClient) SendSMS(to, body string) error {
 	return t.post("Messages.json", form)
 }
 
-func (t *twilioClient) StartCall(to string) error {
-	form := url.Values{"To": {to}, "From": {t.from}, "Url": {elevenLabsTwiMLURL}, "Method": {"POST"}}
-	return t.post("Calls.json", form)
-}
-
 func (t *twilioClient) post(resource string, form url.Values) error {
 	endpoint := fmt.Sprintf("%s/2010-04-01/Accounts/%s/%s", t.base, t.accountSID, resource)
 	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
@@ -78,10 +69,5 @@ type logTelephony struct{}
 
 func (logTelephony) SendSMS(to, body string) error {
 	log.Printf("[twilio-stub] SMS to %s: %s", to, body)
-	return nil
-}
-
-func (logTelephony) StartCall(to string) error {
-	log.Printf("[twilio-stub] call to %s via %s", to, elevenLabsTwiMLURL)
 	return nil
 }

@@ -11,6 +11,8 @@ type Config struct {
 	TwilioAuthToken   string
 	TwilioNumber      string
 	ElevenLabsAPIKey  string
+	ElevenLabsAgentID string
+	ElevenLabsPhoneID string
 	AnthropicAPIKey   string
 	AnthropicModel    string
 	TavilyAPIKey      string
@@ -36,6 +38,8 @@ func LoadConfig() Config {
 		TwilioAuthToken:   os.Getenv("TWILIO_AUTH_TOKEN"),
 		TwilioNumber:      os.Getenv("TWILIO_NUMBER"),
 		ElevenLabsAPIKey:  os.Getenv("ELEVENLABS_API_KEY"),
+		ElevenLabsAgentID: os.Getenv("ELEVENLABS_AGENT_ID"),
+		ElevenLabsPhoneID: os.Getenv("ELEVENLABS_PHONE_ID"),
 		AnthropicAPIKey:   os.Getenv("ANTHROPIC_API_KEY"),
 		AnthropicModel:    env("ANTHROPIC_MODEL", "claude-sonnet-5"),
 		TavilyAPIKey:      os.Getenv("TAVILY_API_KEY"),
@@ -50,6 +54,8 @@ func LoadConfig() Config {
 		"TWILIO_AUTH_TOKEN":   c.TwilioAuthToken,
 		"TWILIO_NUMBER":       c.TwilioNumber,
 		"ELEVENLABS_API_KEY":  c.ElevenLabsAPIKey,
+		"ELEVENLABS_AGENT_ID": c.ElevenLabsAgentID,
+		"ELEVENLABS_PHONE_ID": c.ElevenLabsPhoneID,
 		"ANTHROPIC_API_KEY":   c.AnthropicAPIKey,
 		"TOOL_WEBHOOK_SECRET": c.ToolWebhookSecret,
 	}

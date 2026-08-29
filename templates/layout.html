@@ -18,7 +18,7 @@
 }
 * { box-sizing: border-box; }
 body {
-  margin: 0; padding: 32px 20px 64px;
+  margin: 0; padding: 28px 20px 64px;
   background: var(--bg); color: var(--text);
   font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-size: 16px; line-height: 1.5;
@@ -52,6 +52,35 @@ button:hover { background: #2f6fd8; }
 .err { background: #2a1417; border: 1px solid #5b2029; color: #ffb4b4; padding: 12px; border-radius: 10px; margin-bottom: 16px; }
 a { color: var(--accent); }
 .hint { color: var(--muted); font-size: 13px; margin-top: 8px; }
+
+/* wizard */
+.dots { display: flex; gap: 8px; justify-content: center; margin-bottom: 36px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--line); transition: background .2s; }
+.dot.on { background: var(--accent); }
+.step { display: none; }
+.step.on { display: block; animation: rise .22s ease-out; }
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.step h1 { font-size: 32px; line-height: 1.2; margin-bottom: 10px; }
+.step .sub { margin-bottom: 26px; }
+input.big { font-size: 22px; padding: 16px; text-align: center; letter-spacing: 0.5px; }
+button.choice {
+  display: block; width: 100%; text-align: left; margin: 0 0 12px;
+  padding: 18px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 14px; color: var(--text); font-weight: 500;
+}
+button.choice:hover, button.choice:focus { background: #1a2029; border-color: var(--accent); }
+button.choice strong { display: block; font-size: 18px; font-weight: 600; }
+button.choice span { color: var(--muted); font-size: 14px; }
+button.ghost { background: transparent; border: 1px solid var(--line); color: var(--muted); margin-top: 12px; }
+button.ghost:hover { background: var(--panel); }
+.btn-link {
+  display: block; margin-top: 26px; padding: 14px; border-radius: 10px;
+  background: var(--accent); color: #fff; text-align: center; font-weight: 600; text-decoration: none;
+}
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 20px; }
+.panel label { margin-top: 0; }
+.panel button { margin-top: 12px; }
+.status { color: var(--muted); font-size: 13px; min-height: 18px; margin-top: 10px; }
 </style>
 </head>
 <body><div class="wrap">{{end}}

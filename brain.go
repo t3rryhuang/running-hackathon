@@ -84,8 +84,12 @@ func (b *Brain) contextBlock(u *User) string {
 	if name == "" {
 		name = "(unknown)"
 	}
-	fmt.Fprintf(&sb, "<user>\nname: %s\nphone: %s\nlocal_time: %s\n</user>\n",
-		name, u.Phone, time.Now().In(londonLoc).Format("Mon 2 Jan 15:04"))
+	interests := u.Interests
+	if interests == "" {
+		interests = "(not stated yet)"
+	}
+	fmt.Fprintf(&sb, "<user>\nname: %s\nphone: %s\ninterests: %s\nlocal_time: %s\n</user>\n",
+		name, u.Phone, interests, time.Now().In(londonLoc).Format("Mon 2 Jan 15:04"))
 
 	sb.WriteString("<recent_checkins>\n")
 	checkins, err := b.store.RecentCheckins(u.ID, 10)
@@ -262,7 +266,7 @@ func (b *Brain) SaveCheckin(u *User, mood *int, summary, topics, raw string) err
 // SuggestEvent picks the soonest event not yet offered to this user and records
 // it as an open suggestion.
 func (b *Brain) SuggestEvent(u *User) (*Event, error) {
-	ev, err := b.store.NextEventFor(u.ID)
+	ev, err := b.store.NextEventFor(u.ID, u.InterestList())
 	if err != nil {
 		return nil, err
 	}

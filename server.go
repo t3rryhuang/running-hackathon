@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"embed"
@@ -8,8 +9,10 @@ import (
 	"encoding/xml"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -18,7 +21,7 @@ import (
 //go:embed templates/*.html
 var templateFS embed.FS
 
-//go:embed events.csv
+//go:embed events_live.csv
 var eventsCSV []byte
 
 var tmpl = template.Must(template.ParseFS(templateFS, "templates/*.html"))
@@ -31,22 +34,26 @@ type Server struct {
 	store *Store
 	brain *Brain
 	tel   Telephony
+	voice Voice
 	cal   *Calendar
 }
 
-func NewServer(cfg Config, store *Store, brain *Brain, tel Telephony, cal *Calendar) *Server {
-	return &Server{cfg: cfg, store: store, brain: brain, tel: tel, cal: cal}
+func NewServer(cfg Config, store *Store, brain *Brain, tel Telephony, voice Voice, cal *Calendar) *Server {
+	return &Server{cfg: cfg, store: store, brain: brain, tel: tel, voice: voice, cal: cal}
 }
 
 func (s *Server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/signup", s.handleSignup)
+	mux.HandleFunc("/call", s.handleCall)
+	mux.HandleFunc("/settings", s.handleSettings)
 	mux.HandleFunc("/sms", s.handleSMS)
 	mux.HandleFunc("/journal", s.handleJournal)
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/trigger", s.handleTrigger)
 	mux.HandleFunc("/tools/get_context", s.toolAuth(s.toolGetContext))
+	mux.HandleFunc("/tools/save_onboarding", s.toolAuth(s.toolSaveOnboarding))
 	mux.HandleFunc("/tools/save_checkin", s.toolAuth(s.toolSaveCheckin))
 	mux.HandleFunc("/tools/suggest_event", s.toolAuth(s.toolSuggestEvent))
 	mux.HandleFunc("/tools/accept_suggestion", s.toolAuth(s.toolAcceptSuggestion))
@@ -80,6 +87,10 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	frequency := r.FormValue("frequency")
 
 	if !e164.MatchString(phone) {
+		if wantsJSON(r) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "Phone must be in E.164 format, e.g. +447700900123"})
+			return
+		}
 		s.renderStatus(w, http.StatusBadRequest, "index.html", map[string]any{
 			"Error": "Phone must be in E.164 format, e.g. +447700900123",
 			"Form":  r.Form,
@@ -89,9 +100,7 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	if channel != "call" && channel != "sms" {
 		channel = "sms"
 	}
-	switch frequency {
-	case "daily", "twice-daily", "weekdays":
-	default:
+	if !validFrequency(frequency) {
 		frequency = "daily"
 	}
 
@@ -104,6 +113,10 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.store.UpsertUser(u); err != nil {
 		log.Printf("signup: %v", err)
+		if wantsJSON(r) {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "could not save signup"})
+			return
+		}
 		http.Error(w, "could not save signup", http.StatusInternalServerError)
 		return
 	}
@@ -117,11 +130,72 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if wantsJSON(r) {
+		// The wizard drives steps 4 and 5 client-side, so it only needs the
+		// stored record back rather than a rendered page.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":        true,
+			"phone":     phone,
+			"channel":   channel,
+			"frequency": frequency,
+			"journal":   "/journal?phone=" + url.QueryEscape(phone),
+		})
+		return
+	}
 	s.render(w, "confirm.html", map[string]any{
 		"Phone":     phone,
 		"Channel":   channel,
 		"Frequency": frequency,
 	})
+}
+
+// handleCall rings the user through the ElevenLabs agent. The wizard uses it for
+// the "Call me now" onboarding interview; /trigger uses it for check-ins.
+func (s *Server) handleCall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	phone := normalisePhone(requestFields(r)["phone"])
+	if !e164.MatchString(phone) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "phone must be E.164, e.g. +447700900123"})
+		return
+	}
+	u, err := s.store.EnsureUser(phone)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "user lookup failed"})
+		return
+	}
+	if err := s.voice.Call(u.Phone); err != nil {
+		log.Printf("call: %v", err)
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": "could not place the call"})
+		return
+	}
+	_ = s.store.MarkTriggered(u.ID, time.Now())
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "phone": u.Phone, "onboarded": u.Onboarded()})
+}
+
+// handleSettings changes the check-in frequency from the journal control panel.
+func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
+		return
+	}
+	fields := requestFields(r)
+	if !validFrequency(fields["frequency"]) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "frequency must be daily, twice-daily or weekdays"})
+		return
+	}
+	u, err := s.store.UserByPhone(normalisePhone(fields["phone"]))
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "unknown user"})
+		return
+	}
+	if err := s.store.SetFrequency(u.ID, fields["frequency"]); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "could not save"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "frequency": fields["frequency"]})
 }
 
 // handleSMS is the Twilio inbound SMS webhook. It always answers with TwiML,
@@ -246,7 +320,7 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 func (s *Server) TriggerCheckin(u *User) error {
 	defer func() { _ = s.store.MarkTriggered(u.ID, time.Now()) }()
 	if u.Channel == "call" {
-		return s.tel.StartCall(u.Phone)
+		return s.voice.Call(u.Phone)
 	}
 	body := s.openingMessage(u)
 	if err := s.tel.SendSMS(u.Phone, body); err != nil {
@@ -288,10 +362,13 @@ func (s *Server) toolAuth(next http.HandlerFunc) http.HandlerFunc {
 }
 
 type toolRequest struct {
-	Phone   string `json:"phone"`
-	Mood    *int   `json:"mood"`
-	Summary string `json:"summary"`
-	Topics  string `json:"topics"`
+	Phone     string `json:"phone"`
+	Mood      *int   `json:"mood"`
+	Summary   string `json:"summary"`
+	Topics    string `json:"topics"`
+	Name      string `json:"name"`
+	Interests string `json:"interests"`
+	Frequency string `json:"frequency"`
 }
 
 // toolUser decodes the request body and resolves the caller's user record.
@@ -343,9 +420,30 @@ func (s *Server) toolGetContext(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"name":            u.Name,
+		"onboarded":       u.Onboarded(),
+		"interests":       u.Interests,
+		"frequency":       u.Frequency,
 		"last_checkins":   out,
 		"todays_calendar": calendar,
 		"open_suggestion": open,
+	})
+}
+
+// toolSaveOnboarding stores what the voice agent learned in its intro interview.
+func (s *Server) toolSaveOnboarding(w http.ResponseWriter, r *http.Request) {
+	u, req, ok := s.toolUser(w, r)
+	if !ok {
+		return
+	}
+	if err := s.store.SaveOnboarding(u, req.Name, req.Interests, req.Frequency); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":        true,
+		"name":      u.Name,
+		"interests": u.Interests,
+		"frequency": u.Frequency,
 	})
 }
 
@@ -409,6 +507,49 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("content-type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// wantsJSON reports whether the caller (the onboarding wizard) asked for JSON
+// rather than a rendered page.
+func wantsJSON(r *http.Request) bool {
+	return strings.Contains(r.Header.Get("Accept"), "application/json")
+}
+
+// requestFields accepts JSON, a form post or the query string for the small
+// {phone, frequency} bodies, sniffing the payload rather than trusting the
+// content-type so plain `curl -d '{...}'` works too.
+func requestFields(r *http.Request) map[string]string {
+	out := map[string]string{}
+	for k, v := range r.URL.Query() {
+		if len(v) > 0 {
+			out[k] = v[0]
+		}
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		return out
+	}
+	if trimmed := bytes.TrimSpace(body); len(trimmed) > 0 && trimmed[0] == '{' {
+		var fields map[string]any
+		if err := json.Unmarshal(trimmed, &fields); err == nil {
+			for k, v := range fields {
+				if s, ok := v.(string); ok {
+					out[k] = s
+				}
+			}
+		}
+		return out
+	}
+	form, err := url.ParseQuery(string(body))
+	if err != nil {
+		return out
+	}
+	for k, v := range form {
+		if len(v) > 0 && v[0] != "" {
+			out[k] = v[0]
+		}
+	}
+	return out
 }
 
 // normalisePhone strips spaces and common punctuation and converts a leading

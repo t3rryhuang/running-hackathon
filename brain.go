@@ -158,7 +158,7 @@ func (b *Brain) contextBlock(u *User) string {
 	sb.WriteString("</todays_calendar>\n")
 
 	sb.WriteString("<checklist>\n")
-	if sess, err := b.store.EnsureSession(u, "sms"); err == nil {
+	if sess, err := b.store.EnsureSession(u, "sms", FlowFor(u)); err == nil {
 		items, _ := b.store.Checklist(u.ID, sess.ID)
 		for _, it := range items {
 			answer := it.Answer
@@ -184,30 +184,144 @@ func (b *Brain) contextBlock(u *User) string {
 // Reply runs the conversation turn and returns the SMS body to send back. It
 // never returns an error: on any failure it degrades to a canned reply so the
 // webhook still answers with valid TwiML.
+// A person who has not been onboarded gets onboarding and nothing else: no
+// check-in questions, no "how was your day", no model. Only once onboarding
+// has finished does the check-in conversation start, in its own session.
 func (b *Brain) Reply(ctx context.Context, u *User, inbound string) string {
 	_ = b.store.AddMessage(u.ID, "user", inbound)
-	reply, handled := b.interviewReply(u, inbound)
-	if !handled {
-		reply = b.reply(ctx, u, inbound)
+	var reply string
+	if !u.Onboarded() {
+		reply = b.OnboardingTurn(u, "sms", inbound)
+	} else {
+		var handled bool
+		reply, handled = b.interviewReply(u, inbound)
+		if !handled {
+			reply = b.reply(ctx, u, inbound)
+		}
 	}
 	_ = b.store.AddMessage(u.ID, "assistant", reply)
 	return reply
 }
 
-// interviewCompleteLine closes the interview by asking permission rather than
-// by acting on the answers.
+// interviewCompleteLine closes the check-in checklist by asking permission
+// rather than by acting on the answers.
 const interviewCompleteLine = "That's everything I wanted to ask, thank you. Would you like me to text you when something matching that comes up?"
+
+// onboardingDoneLine ends the introduction. It deliberately does not roll into
+// a check-in: the next conversation is a separate one they agreed to.
+const onboardingDoneLine = "That's you set up. I'll leave you to it and speak to you at your next check-in."
+
+// onboardingDeclinedLine ends the introduction for someone who did not agree to
+// being contacted again. Nothing is scheduled for them.
+const onboardingDeclinedLine = "No problem, I won't check in on a schedule. You're set up, so text me whenever you want an event suggestion."
 
 // reAskLine is used when a reply settles nothing: the item stays open rather
 // than being filled in on the person's behalf.
 const reAskLine = "I didn't catch an answer there, so I'll leave that one open. "
 
-// interviewReply runs the checklist deterministically, without the model: one
-// question per turn, in template order, and an item only leaves "unanswered"
-// when the person actually said something. It reports false once the checklist
-// is settled, which hands the conversation to the model.
+// OnboardingTurn runs one turn of the introduction on any channel. It is
+// deterministic - no model, one question per turn, in template order - and an
+// item only leaves "unanswered" when the person actually said something. The
+// last two questions are the event offer, whose wording names a real event
+// chosen from what they just told us, and consent to be contacted again.
+func (b *Brain) OnboardingTurn(u *User, channel, inbound string) string {
+	sess, err := b.store.EnsureSession(u, channel, FlowOnboarding)
+	if err != nil {
+		log.Printf("onboarding: session for user %d: %v", u.ID, err)
+		return fallbackReply
+	}
+	current, err := b.store.NextChecklistItem(u.ID, sess.ID)
+	if err != nil {
+		return fallbackReply
+	}
+	if current == nil {
+		return b.finishOnboarding(u, sess)
+	}
+
+	// Never put to them yet: ask it and wait for the answer.
+	if current.AskedAt == nil {
+		return b.askQuestion(u, sess, current)
+	}
+
+	status, answer := classifyReply(inbound)
+	if status == StatusUnanswered {
+		return reAskLine + current.Prompt
+	}
+	if _, err := b.store.RecordChecklistAnswer(u, sess.ID, current.Key, status, answer); err != nil {
+		log.Printf("onboarding: record %s for user %d: %v", current.Key, u.ID, err)
+		return current.Prompt
+	}
+	prefix := b.acknowledge(u, current.Key, status, answer)
+
+	next, err := b.store.NextChecklistItem(u.ID, sess.ID)
+	if err != nil || next == nil {
+		return prefix + b.finishOnboarding(u, sess)
+	}
+	return prefix + b.askQuestion(u, sess, next)
+}
+
+// askOnboarding puts one question to the person, writing the wording first for
+// the questions whose wording depends on their answers.
+func (b *Brain) askQuestion(u *User, sess *Session, item *ChecklistItem) string {
+	prompt := item.Prompt
+	if questionByKey(item.Key).Dynamic {
+		prompt = b.dynamicPrompt(u, item)
+		_ = b.store.SetItemPrompt(u.ID, item.ID, prompt)
+	}
+	_ = b.store.MarkAsked(u.ID, item.ID)
+	return prompt
+}
+
+// dynamicPrompt writes the event offer from the interests the person just gave.
+// When nothing clears the relevance bar it says so rather than inventing an
+// event, and the question becomes an honest "what would you actually turn up
+// to".
+func (b *Brain) dynamicPrompt(u *User, item *ChecklistItem) string {
+	if item.Key != "event_offer" {
+		return item.Prompt
+	}
+	match, err := b.SuggestEvent(u)
+	if err != nil {
+		return noMatchLine(u)
+	}
+	ev := match.Event
+	return fmt.Sprintf("Going off that, one thing worth your time: %s, %s in %s. %s Want me to put your name down?",
+		ev.Title, ev.StartsAt.In(londonLoc).Format("Mon 2 Jan at 15:04"), ev.City, match.Why())
+}
+
+// acknowledge is the one line that goes in front of the next question when the
+// previous answer caused something to happen. It states only what the person
+// actually agreed to.
+func (b *Brain) acknowledge(u *User, key, status, answer string) string {
+	if key != "event_offer" || status != StatusAnswered || !isYes(answer) {
+		return ""
+	}
+	confirmation, err := b.AcceptSuggestion(u)
+	if err != nil {
+		return ""
+	}
+	return confirmation + " "
+}
+
+// finishOnboarding closes the introduction: the profile is marked onboarded and
+// the session is closed, so no onboarding state leaks into the check-in
+// conversation. What it says depends on whether they agreed to be contacted.
+func (b *Brain) finishOnboarding(u *User, sess *Session) string {
+	if err := b.store.MarkOnboarded(u); err != nil {
+		log.Printf("onboarding: mark onboarded user %d: %v", u.ID, err)
+	}
+	_ = b.store.CloseSession(u.ID, sess.ID)
+	if status, _, ok := b.store.SettledStatus(u.ID, "checkin_consent"); !ok || status != StatusAnswered {
+		return onboardingDeclinedLine
+	}
+	return onboardingDoneLine
+}
+
+// interviewReply runs the check-in checklist deterministically, without the
+// model. It reports false once the checklist is settled, which hands the
+// conversation to the model.
 func (b *Brain) interviewReply(u *User, inbound string) (string, bool) {
-	sess, err := b.store.EnsureSession(u, "sms")
+	sess, err := b.store.EnsureSession(u, "sms", FlowCheckin)
 	if err != nil {
 		log.Printf("checklist: session for user %d: %v", u.ID, err)
 		return "", false

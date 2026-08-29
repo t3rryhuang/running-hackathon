@@ -106,7 +106,10 @@ func (s *Server) checklistUser(w http.ResponseWriter, r *http.Request) (*User, *
 	if channel == "" {
 		channel = "call"
 	}
-	sess, err := s.store.EnsureSession(u, channel)
+	// The flow is decided by the profile, not by the caller: an agent cannot
+	// ask for the onboarding checklist for someone who is already onboarded,
+	// or run a check-in with someone who has not been introduced yet.
+	sess, err := s.store.EnsureSession(u, channel, FlowFor(u))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return nil, nil, req, false
@@ -135,14 +138,18 @@ func (s *Server) toolNextQuestion(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	_ = s.store.MarkAsked(u.ID, item.ID)
+	// askQuestion writes the wording for questions that name a real event
+	// before it is put to the caller, so the agent reads out the same words
+	// the table records.
+	question := s.brain.askQuestion(u, sess, item)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"complete":             false,
 		"session_id":           sess.ID,
+		"flow":                 sess.Flow,
 		"key":                  item.Key,
-		"question":             item.Prompt,
+		"question":             question,
 		"position":             item.Position + 1,
-		"total":                len(checklistTemplate),
+		"total":                len(templateFor(sess.Flow)),
 		"instruction_to_agent": "Ask this question exactly as written, then wait for their answer. Do not ask anything else and do not answer it for them.",
 	})
 }
@@ -182,12 +189,21 @@ func (s *Server) toolSaveAnswer(w http.ResponseWriter, r *http.Request) {
 	}
 	next, _ := s.store.NextChecklistItem(u.ID, sess.ID)
 	out := map[string]any{"ok": true, "saved": map[string]any{"key": item.Key, "status": item.Status, "answer": item.Answer}}
+	// A yes to the event offer is the one answer that causes an external
+	// action, and it only happens because they said yes.
+	if say := strings.TrimSpace(s.brain.acknowledge(u, item.Key, item.Status, item.Answer)); say != "" {
+		out["say_first"] = say
+	}
 	if next == nil {
 		out["complete"] = true
-		out["instruction_to_agent"] = "That was the last question. Ask whether they want to be notified before you promise anything."
+		if sess.Flow == FlowOnboarding {
+			out["closing_line"] = s.brain.finishOnboarding(u, sess)
+			out["instruction_to_agent"] = "Onboarding is done. Say the closing line, then end the call. Do not start a check-in on this call."
+		} else {
+			out["instruction_to_agent"] = "That was the last question. Ask whether they want to be notified before you promise anything."
+		}
 	} else {
-		_ = s.store.MarkAsked(u.ID, next.ID)
-		out["next"] = map[string]any{"key": next.Key, "question": next.Prompt, "position": next.Position + 1}
+		out["next"] = map[string]any{"key": next.Key, "question": s.brain.askQuestion(u, sess, next), "position": next.Position + 1}
 		out["instruction_to_agent"] = "Ask the next question exactly as written and wait for the answer."
 	}
 	if req.IdempotencyKey != "" {

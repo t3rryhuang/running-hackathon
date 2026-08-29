@@ -209,6 +209,20 @@ func (s *Store) SaveOnboarding(u *User, name, interests, frequency string) error
 	return err
 }
 
+// MarkOnboarded stamps that the introduction finished. It writes nothing else:
+// the answers were already persisted one at a time as they were given.
+func (s *Store) MarkOnboarded(u *User) error {
+	if u.Onboarded() {
+		return nil
+	}
+	now := time.Now().UTC()
+	if _, err := s.exec(`UPDATE users SET onboarded_at=COALESCE(onboarded_at, ?) WHERE id=?`, now, u.ID); err != nil {
+		return err
+	}
+	u.OnboardedAt = &now
+	return nil
+}
+
 // SetCallSID remembers the Twilio call behind the current voice conversation so
 // the service can hang it up once onboarding is done.
 func (s *Store) SetCallSID(userID int64, sid string) error {

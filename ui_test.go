@@ -22,7 +22,6 @@ func TestWizardAccessibleMarkup(t *testing.T) {
 		`aria-valuenow="1"`,
 		`id="err" role="alert"`,
 		`data-channel="call" aria-pressed="false"`,
-		`data-frequency="daily" aria-pressed="false"`,
 		`<label for="phone">`,
 		`<noscript>`,
 		`action="/signup"`,

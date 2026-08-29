@@ -41,6 +41,12 @@ func (s *Scheduler) tick() {
 		if !DueNow(&u, now) {
 			continue
 		}
+		// Onboarding asked whether to check in at all. "No thanks" is an
+		// answer, and it is honoured here rather than being treated as a
+		// question that was never settled.
+		if status, _, ok := s.store.SettledStatus(u.ID, "checkin_consent"); ok && status != StatusAnswered {
+			continue
+		}
 		if err := s.srv.TriggerCheckin(&u); err != nil {
 			log.Printf("scheduler: trigger %s: %v", u.Phone, err)
 			continue
@@ -64,6 +70,11 @@ func slotHours(frequency string) []int {
 // already been triggered inside that slot.
 func DueNow(u *User, now time.Time) bool {
 	now = now.In(londonLoc)
+	// Nobody is put on a schedule before they have been introduced and asked
+	// whether they want one.
+	if !u.Onboarded() {
+		return false
+	}
 	if u.Frequency == "weekdays" {
 		switch now.Weekday() {
 		case time.Saturday, time.Sunday:

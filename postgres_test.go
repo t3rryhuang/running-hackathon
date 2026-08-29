@@ -39,7 +39,7 @@ func TestPostgresBackend(t *testing.T) {
 		t.Fatalf("the same number produced a second user: %v %#v", err, same)
 	}
 
-	sess, err := store.EnsureSession(u, "sms")
+	sess, err := store.EnsureSession(u, "sms", FlowFor(u))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestPostgresBackend(t *testing.T) {
 	if err != nil || item == nil {
 		t.Fatalf("next item: %v %#v", err, item)
 	}
-	if item.Key != checklistTemplate[0].Key {
+	if item.Key != templateFor(sess.Flow)[0].Key {
 		t.Fatalf("checklist out of order on postgres: %s", item.Key)
 	}
 	if _, err := store.RecordChecklistAnswer(u, sess.ID, item.Key, StatusAnswered, "hackathons"); err != nil {

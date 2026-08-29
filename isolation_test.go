@@ -52,11 +52,11 @@ func TestTwoUsersCannotSeeEachOther(t *testing.T) {
 	}
 
 	// Sessions and checklists are per user, and neither can be read across.
-	aSess, err := store.EnsureSession(alice, "sms")
+	aSess, err := store.EnsureSession(alice, "sms", FlowFor(alice))
 	if err != nil {
 		t.Fatalf("alice session: %v", err)
 	}
-	bSess, err := store.EnsureSession(bob, "sms")
+	bSess, err := store.EnsureSession(bob, "sms", FlowFor(bob))
 	if err != nil {
 		t.Fatalf("bob session: %v", err)
 	}
@@ -68,6 +68,9 @@ func TestTwoUsersCannotSeeEachOther(t *testing.T) {
 	}
 
 	// Alice answers; nothing of hers appears on bob's profile or checklist.
+	if _, err := store.RecordChecklistAnswer(alice, aSess.ID, "name", StatusAnswered, "Alice"); err != nil {
+		t.Fatalf("alice name: %v", err)
+	}
 	if _, err := store.RecordChecklistAnswer(alice, aSess.ID, "event_types", StatusAnswered, "hackathons"); err != nil {
 		t.Fatalf("alice answer: %v", err)
 	}
@@ -152,7 +155,7 @@ func TestForgetUserErasesEverything(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ingest: %v", err)
 	}
-	if _, err := store.EnsureSession(u, "sms"); err != nil {
+	if _, err := store.EnsureSession(u, "sms", FlowFor(u)); err != nil {
 		t.Fatalf("session: %v", err)
 	}
 	if err := store.ForgetUser(u.ID); err != nil {

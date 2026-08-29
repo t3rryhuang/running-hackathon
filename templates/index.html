@@ -1,16 +1,14 @@
 {{define "index.html"}}{{template "head" .}}
-<div class="progress" id="progress" role="progressbar" aria-label="Signup progress" aria-valuemin="1" aria-valuenow="1" aria-valuemax="7">
+<div class="progress" id="progress" role="progressbar" aria-label="Signup progress" aria-valuemin="1" aria-valuenow="1" aria-valuemax="3">
   <span class="fill" id="progress-fill"></span>
 </div>
-<p class="sr-only" id="progress-label" aria-live="polite">Step 1 of 7</p>
+<p class="sr-only" id="progress-label" aria-live="polite">Step 1 of 3</p>
 
 <div class="err" id="err" role="alert" hidden></div>
 
 <noscript>
   <p class="sub">The step-by-step version needs JavaScript. This form does the same thing.</p>
   <form method="post" action="/signup">
-    <label for="ns-name">Your name</label>
-    <input type="text" id="ns-name" name="name" autocomplete="given-name">
     <label for="ns-phone">Your number, country code included</label>
     <input type="tel" id="ns-phone" name="phone" placeholder="+447700900123" required>
     <label for="ns-channel">Call or text</label>
@@ -18,40 +16,24 @@
       <option value="sms">Text me</option>
       <option value="call">Call me</option>
     </select>
-    <label for="ns-frequency">How often</label>
-    <select id="ns-frequency" name="frequency">
-      <option value="daily">Daily</option>
-      <option value="twice-daily">Twice daily</option>
-      <option value="weekdays">Weekdays only</option>
-    </select>
-    <label for="ns-interests">What you're into (optional)</label>
-    <input type="text" id="ns-interests" name="interests" placeholder="hackathons, ai">
-    <button type="submit">Sign me up</button>
+    <button type="submit">Start</button>
   </form>
 </noscript>
 
 <section class="step on" data-step="0">
-  <h1>What should I call you?</h1>
-  <p class="sub">First name is plenty.</p>
-  <label for="name">Your first name</label>
-  <input type="text" id="name" class="big" placeholder="Type your name" autocomplete="given-name" autofocus>
-  <button id="name-next">Continue</button>
-</section>
-
-<section class="step" data-step="1">
-  <h1 id="phone-title">What's your number?</h1>
-  <p class="sub">I'll check in on you here. Country code included.</p>
+  <h1>What's your number?</h1>
+  <p class="sub">That's all I need here - the rest we'll talk about. Country code included.</p>
   <label for="phone">Mobile number</label>
-  <input type="tel" id="phone" class="big" placeholder="+447700900123" inputmode="tel" autocomplete="tel">
+  <input type="tel" id="phone" class="big" placeholder="+447700900123" inputmode="tel" autocomplete="tel" autofocus>
   <button id="phone-next">Continue</button>
 </section>
 
-<section class="step" data-step="2">
+<section class="step" data-step="1">
   <h1>Call or text?</h1>
-  <p class="sub">However you'd rather be nudged.</p>
+  <p class="sub">However you'd rather be reached. We'll get to know each other there.</p>
   <button class="choice" data-channel="call" aria-pressed="false">
     <span class="glyph" aria-hidden="true">&#9742;</span>
-    <span class="copy"><strong>Call me</strong><span class="desc">A short voice check-in</span></span>
+    <span class="copy"><strong>Call me</strong><span class="desc">A short voice conversation</span></span>
   </button>
   <button class="choice" data-channel="sms" aria-pressed="false">
     <span class="glyph" aria-hidden="true">&#9993;</span>
@@ -59,62 +41,17 @@
   </button>
 </section>
 
-<section class="step" data-step="3">
-  <h1>How often should I check in?</h1>
-  <p class="sub">You can change this later.</p>
-  <button class="choice" data-frequency="daily" aria-pressed="false">
-    <span class="glyph" aria-hidden="true">1&#215;</span>
-    <span class="copy"><strong>Daily</strong><span class="desc">Every morning at 9</span></span>
-  </button>
-  <button class="choice" data-frequency="twice-daily" aria-pressed="false">
-    <span class="glyph" aria-hidden="true">2&#215;</span>
-    <span class="copy"><strong>Twice daily</strong><span class="desc">Morning and evening</span></span>
-  </button>
-  <button class="choice" data-frequency="weekdays" aria-pressed="false">
-    <span class="glyph" aria-hidden="true">5&#215;</span>
-    <span class="copy"><strong>Weekdays only</strong><span class="desc">Monday to Friday</span></span>
-  </button>
-</section>
-
-<section class="step" data-step="4">
-  <h1>What should I keep an eye out for?</h1>
-  <p class="sub">Tap anything that fits. I only suggest events that match what you pick here.</p>
-  <div class="chips" id="interests" role="group" aria-label="Interests">
-    <button type="button" class="chip" data-interest="hackathons" aria-pressed="false">Hackathons</button>
-    <button type="button" class="chip" data-interest="meetups" aria-pressed="false">Meetups</button>
-    <button type="button" class="chip" data-interest="conferences" aria-pressed="false">Conferences</button>
-    <button type="button" class="chip" data-interest="workshops" aria-pressed="false">Talks &amp; workshops</button>
-    <button type="button" class="chip" data-interest="social" aria-pressed="false">Social</button>
-    <button type="button" class="chip" data-interest="ai" aria-pressed="false">AI &amp; ML</button>
-    <button type="button" class="chip" data-interest="web" aria-pressed="false">Web &amp; software</button>
-    <button type="button" class="chip" data-interest="data" aria-pressed="false">Data</button>
-    <button type="button" class="chip" data-interest="hardware" aria-pressed="false">Hardware</button>
-    <button type="button" class="chip" data-interest="startups" aria-pressed="false">Startups &amp; founders</button>
-  </div>
-  <label for="interests-other">Anything else, comma separated</label>
-  <input type="text" id="interests-other" placeholder="rust, design, climbing">
-  <button id="interests-next">Continue</button>
-  <button class="ghost" id="interests-skip">I'd rather not say</button>
-</section>
-
-<section class="step" data-step="5">
-  <h1 id="ring-title">I'll ring you now to get to know you</h1>
-  <p class="sub" id="ring-sub">A quick chat about what you're into, then I'll leave you alone.</p>
-  <button id="call-now">Call me now</button>
-  <button class="ghost" id="call-skip">Skip for now</button>
-</section>
-
-<section class="step" data-step="6">
+<section class="step" data-step="2">
   <h1>You're in.</h1>
   <p class="sub" id="done-sub">Talk soon.</p>
+  <button id="call-now" hidden>Call me now</button>
   <a class="btn-link" id="journal-link" href="/journal">Open your journal</a>
-  <button class="ghost" id="simulate">Simulate a check-in now</button>
   <p class="hint" id="sim-status"></p>
 </section>
 
 <script>
 (function () {
-  var state = { name: "", phone: "", channel: "sms", frequency: "daily", interests: "" };
+  var state = { phone: "", channel: "sms" };
   var steps = document.querySelectorAll(".step");
   var err = document.getElementById("err");
   var bar = document.getElementById("progress");
@@ -152,21 +89,6 @@
     });
   }
 
-  document.getElementById("name-next").addEventListener("click", function () {
-    var field = document.getElementById("name");
-    var v = field.value.trim();
-    if (v.length < 1) { return fail("Give me something to call you.", field); }
-    field.removeAttribute("aria-invalid");
-    state.name = v;
-    document.getElementById("phone-title").textContent = "Nice to meet you, " + v + ". What's your number?";
-    document.getElementById("ring-title").textContent = "I'll ring you now to get to know you, " + v;
-    show(1);
-    document.getElementById("phone").focus();
-  });
-  document.getElementById("name").addEventListener("keydown", function (e) {
-    if (e.key === "Enter") { document.getElementById("name-next").click(); }
-  });
-
   document.getElementById("phone-next").addEventListener("click", function () {
     var field = document.getElementById("phone");
     var v = field.value.replace(/[\s\-().]/g, "");
@@ -175,7 +97,7 @@
     }
     field.removeAttribute("aria-invalid");
     state.phone = v;
-    show(2);
+    show(1);
   });
   document.getElementById("phone").addEventListener("keydown", function (e) {
     if (e.key === "Enter") { document.getElementById("phone-next").click(); }
@@ -185,65 +107,31 @@
     b.addEventListener("click", function () {
       state.channel = b.dataset.channel;
       pick("[data-channel]", b);
-      show(3);
+      signup(b);
     });
-  });
-
-  document.querySelectorAll("[data-frequency]").forEach(function (b) {
-    b.addEventListener("click", function () {
-      state.frequency = b.dataset.frequency;
-      pick("[data-frequency]", b);
-      show(4);
-    });
-  });
-
-  document.querySelectorAll("[data-interest]").forEach(function (b) {
-    b.addEventListener("click", function () {
-      var on = b.classList.toggle("on");
-      b.setAttribute("aria-pressed", on ? "true" : "false");
-    });
-  });
-
-  // Chips plus the free-text box become one comma-separated string, which is
-  // exactly the shape the voice agent's save_onboarding tool writes too.
-  function collectInterests() {
-    var picked = [];
-    document.querySelectorAll("[data-interest].on").forEach(function (b) { picked.push(b.dataset.interest); });
-    document.getElementById("interests-other").value.split(",").forEach(function (s) {
-      s = s.trim();
-      if (s) { picked.push(s); }
-    });
-    return picked.join(", ");
-  }
-
-  document.getElementById("interests-next").addEventListener("click", function () {
-    state.interests = collectInterests();
-    if (!state.interests) { return fail("Pick at least one, or tap \u201cI'd rather not say\u201d."); }
-    signup(this);
-  });
-  document.getElementById("interests-skip").addEventListener("click", function () {
-    state.interests = "";
-    signup(this);
   });
 
   function signup(btn) {
-    var body = new URLSearchParams(state);
     busy(btn, true);
     fetch("/signup", {
       method: "POST",
       headers: { "Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded" },
-      body: body
+      body: new URLSearchParams(state)
     }).then(function (r) { return r.json(); }).then(function (j) {
       busy(btn, false);
       if (!j.ok) { return fail(j.error || "Something went wrong."); }
       document.getElementById("journal-link").href = j.journal;
+      var call = document.getElementById("call-now");
       if (state.channel === "call") {
-        show(5);
-      } else {
+        call.hidden = false;
         document.getElementById("done-sub").textContent =
-          "Check your phone - I've texted " + state.phone + ". Reply to it and your first check-in starts.";
-        show(6);
+          "Tap below and I'll ring " + state.phone + " to get to know you.";
+      } else {
+        call.hidden = true;
+        document.getElementById("done-sub").textContent =
+          "Check your phone - I've texted " + state.phone + ". Reply and we'll take it from there.";
       }
+      show(2);
     }).catch(function () {
       busy(btn, false);
       fail("Could not reach the server.");
@@ -252,39 +140,21 @@
 
   document.getElementById("call-now").addEventListener("click", function () {
     var btn = this;
-    busy(btn, true);
-    post("/call").then(function (j) {
-      busy(btn, false);
-      if (!j.ok) { return fail(j.error || "Could not place the call."); }
-      document.getElementById("done-sub").textContent = "Pick up - I'm calling " + state.phone + " now.";
-      show(6);
-    });
-  });
-
-  document.getElementById("call-skip").addEventListener("click", function () {
-    document.getElementById("done-sub").textContent = "I'll ring " + state.phone + " at your next check-in.";
-    show(6);
-  });
-
-  document.getElementById("simulate").addEventListener("click", function () {
-    var btn = this;
     var status = document.getElementById("sim-status");
     busy(btn, true);
-    status.textContent = "Sending...";
-    fetch("/trigger?phone=" + encodeURIComponent(state.phone), { method: "POST" })
-      .then(function (r) { return r.json(); })
-      .then(function (j) { status.textContent = j.ok ? "Sent - check your phone." : "Trigger failed."; })
-      .catch(function () { status.textContent = "Trigger failed."; })
-      .then(function () { busy(btn, false); });
-  });
-
-  function post(path) {
-    return fetch(path, {
+    status.textContent = "Dialling...";
+    fetch("/call", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phone: state.phone, name: state.name })
-    }).then(function (r) { return r.json(); }).catch(function () { return { ok: false, error: "Network error." }; });
-  }
+      body: JSON.stringify({ phone: state.phone })
+    }).then(function (r) { return r.json(); }).then(function (j) {
+      busy(btn, false);
+      status.textContent = j.ok ? "Pick up - I'm calling you now." : (j.error || "Could not place the call.");
+    }).catch(function () {
+      busy(btn, false);
+      status.textContent = "Could not place the call.";
+    });
+  });
 })();
 </script>
 {{template "foot" .}}{{end}}

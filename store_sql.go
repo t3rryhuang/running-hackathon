@@ -180,6 +180,17 @@ CREATE TABLE IF NOT EXISTS webhook_events (
 	{Version: 6, Name: "answer_provenance", SQL: []string{
 		`ALTER TABLE checklist_items ADD COLUMN source {{text}} NOT NULL DEFAULT 'conversation'`,
 	}},
+
+	// Onboarding and check-ins are different conversations with different
+	// question lists, so a session says which one it is. Sessions open under
+	// the old single list are closed rather than relabelled: their checklist
+	// rows belong to a template that no longer exists, and finishing them
+	// would mix the two flows exactly as this migration exists to prevent.
+	{Version: 7, Name: "session_flow", SQL: []string{
+		`ALTER TABLE sessions ADD COLUMN flow {{text}} NOT NULL DEFAULT 'checkin'`,
+		`UPDATE sessions SET state='closed', ended_at=CURRENT_TIMESTAMP WHERE state='open'`,
+		`CREATE INDEX IF NOT EXISTS sessions_user_flow ON sessions (user_id, flow, state)`,
+	}},
 }
 
 // Store is the persistence layer. Every user-scoped query takes a user id and

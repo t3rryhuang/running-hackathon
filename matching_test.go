@@ -143,18 +143,13 @@ func TestNormaliseInterests(t *testing.T) {
 	}
 }
 
-// End to end: the wizard's interests reach the database, the agent context, and
-// the recommendation engine.
-func TestSignupCapturesInterestsThroughToRecommendation(t *testing.T) {
-	srv, store, _, _ := newTestServer(t, nil)
+// End to end: the interests someone gives over SMS reach the database, the
+// agent context, and the recommendation engine.
+func TestOnboardingCapturesInterestsThroughToRecommendation(t *testing.T) {
+	srv, store, tel, _ := newTestServer(t, nil)
+	phone := "+447700900150"
 
-	form := url.Values{
-		"name":      {"Keanu"},
-		"phone":     {"+447700900150"},
-		"channel":   {"sms"},
-		"frequency": {"daily"},
-		"interests": {"Hackathons, AI"},
-	}
+	form := url.Values{"phone": {phone}, "channel": {"sms"}}
 	req := httptest.NewRequest(http.MethodPost, "/signup", strings.NewReader(form.Encode()))
 	req.Header.Set("content-type", "application/x-www-form-urlencoded")
 	req.Header.Set("accept", "application/json")
@@ -163,17 +158,15 @@ func TestSignupCapturesInterestsThroughToRecommendation(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("signup status %d: %s", rec.Code, rec.Body.String())
 	}
-	var out struct {
-		Interests string `json:"interests"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		t.Fatalf("bad json: %v", err)
-	}
-	if out.Interests != "hackathons, ai" {
-		t.Fatalf("signup should echo stored interests, got %q", out.Interests)
+	// The website's only job is to open the conversation.
+	if len(tel.sms) != 1 || !strings.Contains(tel.sms[0], onboardingTemplate[0].Prompt) {
+		t.Fatalf("introduction not opened over sms: %#v", tel.sms)
 	}
 
-	u, err := store.UserByPhone("+447700900150")
+	postSMS(t, srv, phone, "Keanu")
+	postSMS(t, srv, phone, "Hackathons, AI")
+
+	u, err := store.UserByPhone(phone)
 	if err != nil {
 		t.Fatalf("user: %v", err)
 	}
@@ -184,15 +177,14 @@ func TestSignupCapturesInterestsThroughToRecommendation(t *testing.T) {
 		t.Fatalf("recommendation view of interests = %#v", u.InterestList())
 	}
 
-	// A later signup that skips the question keeps the stored answer.
-	form.Del("interests")
+	// Coming back through the website does not wipe what they told us.
 	req = httptest.NewRequest(http.MethodPost, "/signup", strings.NewReader(form.Encode()))
 	req.Header.Set("content-type", "application/x-www-form-urlencoded")
 	req.Header.Set("accept", "application/json")
 	srv.Routes().ServeHTTP(httptest.NewRecorder(), req)
-	u, _ = store.UserByPhone("+447700900150")
-	if u.Interests != "hackathons, ai" {
-		t.Fatalf("re-signup wiped interests: %q", u.Interests)
+	u, _ = store.UserByPhone(phone)
+	if u.Interests != "hackathons, ai" || u.Name != "Keanu" {
+		t.Fatalf("returning through the website reset the profile: %#v", u)
 	}
 
 	// And the agent context exposes them.

@@ -97,30 +97,42 @@ func newTestServer(t *testing.T, client AnthropicClient) (*Server, *Store, *reco
 	return srv, store, tel, voice
 }
 
-// settleChecklist walks the interview to the end for a user, so a test can
-// exercise the journalling loop rather than the interview that precedes it.
+// settleChecklist walks both interviews to the end for a user and marks them
+// onboarded, so a test can exercise the journalling loop rather than the
+// introduction and the check-in checklist that precede it.
 func settleChecklist(t *testing.T, store *Store, phone string) *User {
 	t.Helper()
 	u, err := store.EnsureUser(phone)
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	sess, err := store.EnsureSession(u, "sms")
-	if err != nil {
-		t.Fatalf("ensure session: %v", err)
-	}
-	for {
-		item, err := store.NextChecklistItem(u.ID, sess.ID)
+	for _, flow := range []string{FlowOnboarding, FlowCheckin} {
+		sess, err := store.EnsureSession(u, "sms", flow)
 		if err != nil {
-			t.Fatalf("next item: %v", err)
+			t.Fatalf("ensure %s session: %v", flow, err)
 		}
-		if item == nil {
-			return u
+		for {
+			item, err := store.NextChecklistItem(u.ID, sess.ID)
+			if err != nil {
+				t.Fatalf("next item: %v", err)
+			}
+			if item == nil {
+				break
+			}
+			if _, err := store.RecordChecklistAnswer(u, sess.ID, item.Key, StatusSkipped, ""); err != nil {
+				t.Fatalf("settle %s: %v", item.Key, err)
+			}
 		}
-		if _, err := store.RecordChecklistAnswer(u, sess.ID, item.Key, StatusSkipped, ""); err != nil {
-			t.Fatalf("settle %s: %v", item.Key, err)
+		if flow == FlowOnboarding {
+			if err := store.MarkOnboarded(u); err != nil {
+				t.Fatalf("mark onboarded: %v", err)
+			}
+			if err := store.CloseSession(u.ID, sess.ID); err != nil {
+				t.Fatalf("close onboarding session: %v", err)
+			}
 		}
 	}
+	return u
 }
 
 func postSMS(t *testing.T, srv *Server, from, body string) *httptest.ResponseRecorder {
@@ -357,7 +369,7 @@ func TestSuggestEventPrefersStatedInterests(t *testing.T) {
 func TestCallEndpointRingsThroughVoice(t *testing.T) {
 	srv, _, _, voice := newTestServer(t, nil)
 
-	req := httptest.NewRequest(http.MethodPost, "/call", strings.NewReader(`{"phone":"+447700900142","name":"Keanu"}`))
+	req := httptest.NewRequest(http.MethodPost, "/call", strings.NewReader(`{"phone":"+447700900142"}`))
 	req.Header.Set("content-type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, req)
@@ -367,9 +379,13 @@ func TestCallEndpointRingsThroughVoice(t *testing.T) {
 	if len(voice.calls) != 1 || voice.calls[0].To != "+447700900142" {
 		t.Fatalf("call not placed: %#v", voice.calls)
 	}
-	// The wizard collects the name first so the agent can open with it.
-	if voice.calls[0].Name != "Keanu" {
-		t.Fatalf("call should carry the name: %#v", voice.calls[0])
+	// Nobody has said their name yet, so the agent is told to ask for it
+	// rather than being handed one by the website.
+	if voice.calls[0].Name != "" || voice.calls[0].Vars["user_name"] != "unknown" {
+		t.Fatalf("call invented a name: %#v", voice.calls[0])
+	}
+	if !strings.Contains(voice.calls[0].Vars["ask_only"], "name") {
+		t.Fatalf("agent not asked to introduce itself: %#v", voice.calls[0].Vars)
 	}
 
 	rec = httptest.NewRecorder()
@@ -464,9 +480,11 @@ func TestSignupReturnsJSONForWizard(t *testing.T) {
 	}
 }
 
-func TestSignupCreatesUserAndSendsWelcomeSMS(t *testing.T) {
+// The website captures a number and a channel and nothing else: the first
+// question is put to them in the conversation itself.
+func TestSignupCreatesUserAndOpensTheConversation(t *testing.T) {
 	srv, store, tel, _ := newTestServer(t, nil)
-	form := url.Values{"phone": {"+44 7700 900129"}, "channel": {"sms"}, "frequency": {"weekdays"}, "name": {"Keanu"}}
+	form := url.Values{"phone": {"+44 7700 900129"}, "channel": {"sms"}}
 	req := httptest.NewRequest(http.MethodPost, "/signup", strings.NewReader(form.Encode()))
 	req.Header.Set("content-type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
@@ -479,11 +497,11 @@ func TestSignupCreatesUserAndSendsWelcomeSMS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("user not created: %v", err)
 	}
-	if u.Frequency != "weekdays" || u.Name != "Keanu" {
-		t.Fatalf("unexpected user: %#v", u)
+	if u.Name != "" || u.Interests != "" || u.Onboarded() {
+		t.Fatalf("website assumed something about them: %#v", u)
 	}
-	if len(tel.sms) != 1 || !strings.Contains(tel.sms[0], "I'm CheckIn") {
-		t.Fatalf("welcome sms not sent: %#v", tel.sms)
+	if len(tel.sms) != 1 || !strings.Contains(tel.sms[0], onboardingTemplate[0].Prompt) {
+		t.Fatalf("introduction not opened: %#v", tel.sms)
 	}
 }
 
@@ -503,6 +521,11 @@ func TestTriggerSendsOpeningMessageOrCall(t *testing.T) {
 	srv, store, tel, voice := newTestServer(t, nil)
 	_ = store.CreateUser(&User{Phone: "+447700900131", Name: "Sam", Channel: "sms", Frequency: "daily"})
 	_ = store.CreateUser(&User{Phone: "+447700900132", Channel: "call", Frequency: "daily"})
+	// A check-in only goes to someone who has already been introduced.
+	sam, _ := store.UserByPhone("+447700900131")
+	if err := store.MarkOnboarded(sam); err != nil {
+		t.Fatalf("mark onboarded: %v", err)
+	}
 
 	for _, phone := range []string{"+447700900131", "+447700900132"} {
 		rec := httptest.NewRecorder()
@@ -542,7 +565,8 @@ func TestDueNow(t *testing.T) {
 	at := func(day, hour int) time.Time {
 		return time.Date(2026, 9, day, hour, 5, 0, 0, londonLoc)
 	}
-	daily := &User{Frequency: "daily"}
+	onboarded := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	daily := &User{Frequency: "daily", OnboardedAt: &onboarded}
 	if !DueNow(daily, at(15, 9)) {
 		t.Error("daily user should be due at 09:xx")
 	}
@@ -550,17 +574,20 @@ func TestDueNow(t *testing.T) {
 		t.Error("daily user should not be due at 11:xx")
 	}
 	last := at(15, 9).Add(-time.Minute)
-	fired := &User{Frequency: "daily", LastTriggeredAt: &last}
+	fired := &User{Frequency: "daily", LastTriggeredAt: &last, OnboardedAt: &onboarded}
 	if DueNow(fired, at(15, 9)) {
 		t.Error("should not double-fire inside the same slot")
 	}
-	weekend := &User{Frequency: "weekdays"}
+	weekend := &User{Frequency: "weekdays", OnboardedAt: &onboarded}
 	if DueNow(weekend, at(19, 9)) { // 19 Sept 2026 is a Saturday
 		t.Error("weekdays user should not fire at the weekend")
 	}
-	twice := &User{Frequency: "twice-daily"}
+	twice := &User{Frequency: "twice-daily", OnboardedAt: &onboarded}
 	if !DueNow(twice, at(15, 20)) {
 		t.Error("twice-daily user should be due at 20:xx")
+	}
+	if DueNow(&User{Frequency: "daily"}, at(15, 9)) {
+		t.Error("somebody who has not been introduced was put on a schedule")
 	}
 }
 
@@ -620,7 +647,9 @@ func TestTwilioAPIBaseRegionSelection(t *testing.T) {
 	}
 }
 
-func TestWizardAsksForNameFirst(t *testing.T) {
+// The website is a way to reach someone, not an interview: a number, a
+// channel, and the rest happens in the conversation.
+func TestWebFlowOnlyCollectsContactDetails(t *testing.T) {
 	srv, _, _, _ := newTestServer(t, nil)
 	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -628,26 +657,12 @@ func TestWizardAsksForNameFirst(t *testing.T) {
 		t.Fatalf("status %d", rec.Code)
 	}
 	body := rec.Body.String()
-	name := strings.Index(body, "What should I call you?")
-	phone := strings.Index(body, "What's your number?")
-	if name < 0 || phone < 0 {
-		t.Fatalf("wizard missing a step: name=%d phone=%d", name, phone)
+	if !strings.Contains(body, "What's your number?") || !strings.Contains(body, `data-channel="sms"`) {
+		t.Fatalf("web flow lost the contact step: %s", body)
 	}
-	if name > phone {
-		t.Errorf("name step should come before the phone step")
-	}
-}
-
-// The onboarding flow has to ask about interests: they are the only input the
-// recommendation engine is allowed to act on.
-func TestWizardAsksForInterests(t *testing.T) {
-	srv, _, _, _ := newTestServer(t, nil)
-	rec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-	body := rec.Body.String()
-	for _, want := range []string{`data-interest="hackathons"`, `data-interest="meetups"`, `data-interest="conferences"`, `data-interest="social"`, `data-interest="ai"`, "interests-other", "interests-skip"} {
-		if !strings.Contains(body, want) {
-			t.Errorf("interests step missing %q", want)
+	for _, gone := range []string{"data-interest=", "data-frequency=", `id="name"`, "interests-other"} {
+		if strings.Contains(body, gone) {
+			t.Errorf("web flow still interviews the user: found %q", gone)
 		}
 	}
 }

@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// signedUp is a person who filled the form in: verified number, name,
-// interests and frequency on file.
+// signedUp is a person who has been through the introduction: verified
+// number, with the name, interests and frequency they gave persisted.
 func signedUp(t *testing.T, store *Store, phone, name, interests, frequency string) *User {
 	t.Helper()
 	u, err := store.EnsureUser(phone)
@@ -32,7 +32,7 @@ func signedUp(t *testing.T, store *Store, phone, name, interests, frequency stri
 
 func callerContextFor(t *testing.T, store *Store, u *User) CallerContext {
 	t.Helper()
-	sess, err := store.EnsureSession(u, "call")
+	sess, err := store.EnsureSession(u, "call", FlowFor(u))
 	if err != nil {
 		t.Fatalf("ensure session: %v", err)
 	}
@@ -84,17 +84,22 @@ func TestCallerContextCompleteProfileNeverReAsks(t *testing.T) {
 // A half-filled profile is asked only for the holes, in template order.
 func TestCallerContextPartialProfileAsksOnlyMissing(t *testing.T) {
 	_, store, _, _ := newTestServer(t, &fakeAnthropic{err: errModelUnavailable})
-	u := signedUp(t, store, "+447700900302", "Jo", "", "")
-
-	c := callerContextFor(t, store, u)
-	for _, key := range []string{"name", "frequency"} {
-		if contains(c.Missing, key) {
-			t.Errorf("%s is on file but was asked for", key)
-		}
+	u, err := store.EnsureUser("+447700900302")
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
 	}
-	// Interests were never given, so the interview starts at the first
-	// checklist question rather than skipping it.
-	want := []string{"event_types", "event_time", "evening_availability", "notify_watch"}
+	u.Name = "Jo"
+	if err := store.UpsertUser(u); err != nil {
+		t.Fatalf("save name: %v", err)
+	}
+
+	// Half way through the introduction: the name is on file, nothing else is,
+	// so the call resumes at the first question they have not answered.
+	c := callerContextFor(t, store, u)
+	if contains(c.Missing, "name") {
+		t.Error("name is on file but was asked for")
+	}
+	want := []string{"event_types", "event_time", "event_offer", "checkin_consent"}
 	if strings.Join(c.Missing, ",") != strings.Join(want, ",") {
 		t.Fatalf("missing = %v, want %v", c.Missing, want)
 	}
@@ -154,15 +159,12 @@ func TestCallerContextResumedSessionReusesSettledAnswers(t *testing.T) {
 	_, store, _, _ := newTestServer(t, &fakeAnthropic{err: errModelUnavailable})
 	u := signedUp(t, store, "+447700900305", "Sam", "hackathons", "daily")
 
-	first, err := store.EnsureSession(u, "call")
+	first, err := store.EnsureSession(u, "call", FlowFor(u))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
-	if _, err := store.RecordChecklistAnswer(u, first.ID, "event_time", StatusAnswered, "evenings"); err != nil {
+	if _, err := store.RecordChecklistAnswer(u, first.ID, "evening_availability", StatusAnswered, "yes, after 7"); err != nil {
 		t.Fatalf("answer: %v", err)
-	}
-	if _, err := store.RecordChecklistAnswer(u, first.ID, "evening_availability", StatusSkipped, ""); err != nil {
-		t.Fatalf("skip: %v", err)
 	}
 	if _, err := store.RecordChecklistAnswer(u, first.ID, "notify_watch", StatusDeclined, ""); err != nil {
 		t.Fatalf("decline: %v", err)
@@ -172,10 +174,10 @@ func TestCallerContextResumedSessionReusesSettledAnswers(t *testing.T) {
 	}
 
 	c := callerContextFor(t, store, u)
-	if c.Known["event_time"].Value != "evenings" {
-		t.Errorf("earlier answer lost: %+v", c.Known["event_time"])
+	if c.Known["evening_availability"].Value != "yes, after 7" {
+		t.Errorf("earlier answer lost: %+v", c.Known["evening_availability"])
 	}
-	if contains(c.Missing, "event_time") {
+	if contains(c.Missing, "evening_availability") {
 		t.Error("re-asked a question answered last time")
 	}
 	// Declined stays settled: no value stated, and never asked again.
@@ -193,12 +195,9 @@ func TestCallerContextStaleAnswerIsAskedAgain(t *testing.T) {
 	_, store, _, _ := newTestServer(t, &fakeAnthropic{err: errModelUnavailable})
 	u := signedUp(t, store, "+447700900306", "Ada", "hackathons", "daily")
 
-	first, err := store.EnsureSession(u, "call")
+	first, err := store.EnsureSession(u, "call", FlowFor(u))
 	if err != nil {
 		t.Fatalf("session: %v", err)
-	}
-	if _, err := store.RecordChecklistAnswer(u, first.ID, "event_time", StatusAnswered, "evenings"); err != nil {
-		t.Fatalf("answer: %v", err)
 	}
 	if _, err := store.RecordChecklistAnswer(u, first.ID, "evening_availability", StatusAnswered, "yes"); err != nil {
 		t.Fatalf("answer: %v", err)
@@ -208,7 +207,7 @@ func TestCallerContextStaleAnswerIsAskedAgain(t *testing.T) {
 	}
 
 	// The next call carries the answer while it is still fresh.
-	second, err := store.EnsureSession(u, "call")
+	second, err := store.EnsureSession(u, "call", FlowFor(u))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -225,7 +224,7 @@ func TestCallerContextStaleAnswerIsAskedAgain(t *testing.T) {
 		time.Now().UTC().Add(-48*time.Hour), u.ID, "evening_availability"); err != nil {
 		t.Fatalf("age answer: %v", err)
 	}
-	third, err := store.EnsureSession(u, "call")
+	third, err := store.EnsureSession(u, "call", FlowFor(u))
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}

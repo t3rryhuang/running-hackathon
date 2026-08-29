@@ -52,24 +52,29 @@ func buildCallerContext(phone string, u *User, items []ChecklistItem) CallerCont
 
 	c.Resolved = true
 	c.PhoneVerified = u.PhoneVerified()
-	// Name and frequency come off the profile the signup form wrote; the rest
-	// come from the checklist. The order is fixed so every call asks for the
-	// same things in the same sequence.
-	for _, f := range []struct {
+	// What the introduction already persisted to the profile is known for good
+	// and is never asked for again, on any call.
+	profile := []struct {
 		key   string
 		field Field
 	}{
 		{"name", known(u.DisplayName(), SourceProfile)},
 		{"frequency", known(u.Frequency, SourceProfile)},
-	} {
-		c.Known[f.key] = f.field
-		if f.field.Known {
-			c.DoNotAsk = append(c.DoNotAsk, f.key)
-		} else {
-			c.Missing = append(c.Missing, f.key)
+		{"event_types", known(u.Interests, SourceProfile)},
+	}
+	for _, f := range profile {
+		if !f.field.Known {
+			continue
 		}
+		c.Known[f.key] = f.field
+		c.DoNotAsk = append(c.DoNotAsk, f.key)
 	}
 	for _, it := range items {
+		// A checklist row for something already on the profile is the same
+		// question, so it must not produce a second entry either way.
+		if _, ok := c.Known[it.Key]; ok {
+			continue
+		}
 		if it.Status == StatusAnswered {
 			c.Known[it.Key] = known(it.Answer, it.Source)
 			c.DoNotAsk = append(c.DoNotAsk, it.Key)
@@ -110,8 +115,10 @@ func (c CallerContext) DynamicVariables() map[string]string {
 		}
 		vars[name] = "unknown"
 	}
-	if _, ok := vars["user_name"]; !ok {
-		vars["user_name"] = "unknown"
+	for _, key := range []string{"user_name", "user_frequency", "user_event_types"} {
+		if _, ok := vars[key]; !ok {
+			vars[key] = "unknown"
+		}
 	}
 	return vars
 }

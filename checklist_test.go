@@ -53,52 +53,102 @@ func toolPost(t *testing.T, srv *Server, path string, body map[string]any, out a
 	}
 }
 
-// The interview asks the template questions in order, one per turn, and never
-// moves on until the person has actually said something.
-func TestInterviewAsksOneQuestionAtATimeInOrder(t *testing.T) {
+// The introduction asks the onboarding questions in order, one per turn, and
+// never moves on until the person has actually said something.
+func TestOnboardingAsksOneQuestionAtATimeInOrder(t *testing.T) {
 	srv, store, _, _ := newTestServer(t, &fakeAnthropic{err: errModelUnavailable})
 	phone := "+447700900201"
 
 	first := smsBody(t, postSMS(t, srv, phone, "hi"))
-	if first != "What type of events do you like to go to?" {
+	if first != onboardingTemplate[0].Prompt {
 		t.Fatalf("first question wrong: %q", first)
 	}
 
 	// An empty reply settles nothing: the same question comes back.
 	again := smsBody(t, postSMS(t, srv, phone, "   "))
-	if !strings.HasSuffix(again, "What type of events do you like to go to?") {
-		t.Fatalf("empty reply advanced the interview: %q", again)
+	if !strings.HasSuffix(again, onboardingTemplate[0].Prompt) {
+		t.Fatalf("empty reply advanced the introduction: %q", again)
 	}
 	u, _ := store.UserByPhone(phone)
-	if _, ok := store.ChecklistAnswer(u.ID, "event_types"); ok {
+	if _, ok := store.ChecklistAnswer(u.ID, "name"); ok {
 		t.Error("an empty message was recorded as an answer")
 	}
 
-	second := smsBody(t, postSMS(t, srv, phone, "hackathons and meetups"))
-	if second != "What time do you like to go to events?" {
+	second := smsBody(t, postSMS(t, srv, phone, "Keanu"))
+	if second != onboardingTemplate[1].Prompt {
 		t.Fatalf("second question wrong: %q", second)
+	}
+	if u, _ = store.UserByPhone(phone); u.Name != "Keanu" {
+		t.Fatalf("name not persisted to the profile: %q", u.Name)
+	}
+
+	third := smsBody(t, postSMS(t, srv, phone, "hackathons and meetups"))
+	if third != onboardingTemplate[2].Prompt {
+		t.Fatalf("third question wrong: %q", third)
 	}
 	if got, ok := store.ChecklistAnswer(u.ID, "event_types"); !ok || got != "hackathons and meetups" {
 		t.Fatalf("answer not persisted: %q ok=%v", got, ok)
 	}
-	// The first answer also lands on the profile that matching reads.
+	// That answer also lands on the profile that matching reads.
 	if u, _ = store.UserByPhone(phone); !strings.Contains(u.Interests, "hackathon") {
 		t.Errorf("interests not derived from the answer: %q", u.Interests)
 	}
 
-	third := smsBody(t, postSMS(t, srv, phone, "evenings after 6"))
-	if third != "Are you free for an event with like-minded people at 7 PM?" {
-		t.Fatalf("third question wrong: %q", third)
-	}
-	fourth := smsBody(t, postSMS(t, srv, phone, "yes"))
-	if fourth != "What should we keep our eyes out for to notify you?" {
-		t.Fatalf("fourth question wrong: %q", fourth)
+	// Fourth is the event offer, whose wording is written from what they just
+	// said rather than being fixed in the template.
+	offer := smsBody(t, postSMS(t, srv, phone, "weekday evenings"))
+	if offer == "" || offer == onboardingTemplate[4].Prompt {
+		t.Fatalf("expected an event offer, got %q", offer)
 	}
 
-	// The last answer ends the interview by asking permission, not by acting.
-	done := smsBody(t, postSMS(t, srv, phone, "AI hack nights in Shoreditch"))
-	if !strings.Contains(done, "Would you like me to text you") {
-		t.Fatalf("interview should close by asking permission, got %q", done)
+	// Check-ins are a separate ask, and the introduction ends there rather
+	// than rolling into one.
+	consent := smsBody(t, postSMS(t, srv, phone, "no thanks"))
+	if !strings.Contains(consent, onboardingTemplate[4].Prompt) {
+		t.Fatalf("consent question not asked separately: %q", consent)
+	}
+	done := smsBody(t, postSMS(t, srv, phone, "daily"))
+	if done != onboardingDoneLine {
+		t.Fatalf("introduction should close, got %q", done)
+	}
+	u, _ = store.UserByPhone(phone)
+	if !u.Onboarded() {
+		t.Fatal("finished introduction did not mark the profile onboarded")
+	}
+	if u.Frequency != "daily" {
+		t.Errorf("consent answer did not set the cadence: %q", u.Frequency)
+	}
+}
+
+// A check-in never repeats the introduction, and the introduction never asks a
+// check-in question.
+func TestOnboardingAndCheckinAreSeparateFlows(t *testing.T) {
+	srv, store, _, _ := newTestServer(t, &fakeAnthropic{err: errModelUnavailable})
+	phone := "+447700900204"
+
+	for _, reply := range []string{"hi", "Ada", "hackathons", "weekends", "no thanks", "no thanks"} {
+		body := smsBody(t, postSMS(t, srv, phone, reply))
+		for _, q := range checkinTemplate {
+			if strings.Contains(body, q.Prompt) {
+				t.Fatalf("check-in question %q asked during the introduction", q.Prompt)
+			}
+		}
+	}
+
+	u, _ := store.UserByPhone(phone)
+	if !u.Onboarded() {
+		t.Fatal("introduction did not finish")
+	}
+	// The next message is a check-in, and it starts with the check-in
+	// checklist rather than asking who they are again.
+	next := smsBody(t, postSMS(t, srv, phone, "hello again"))
+	if next != checkinTemplate[0].Prompt {
+		t.Fatalf("check-in did not start its own flow: %q", next)
+	}
+	for _, q := range onboardingTemplate {
+		if q.Prompt != "" && strings.Contains(next, q.Prompt) {
+			t.Fatalf("introduction question repeated after onboarding: %q", next)
+		}
 	}
 }
 
@@ -108,9 +158,10 @@ func TestSkipAndDeclineSettleWithoutAnswering(t *testing.T) {
 	srv, store, _, _ := newTestServer(t, &fakeAnthropic{err: errModelUnavailable})
 	phone := "+447700900202"
 
-	postSMS(t, srv, phone, "hi")
+	postSMS(t, srv, phone, "hi") // asks for the name
+	postSMS(t, srv, phone, "Jo") // names them, asks what they are into
 	next := smsBody(t, postSMS(t, srv, phone, "skip"))
-	if next != "What time do you like to go to events?" {
+	if next != onboardingTemplate[2].Prompt {
 		t.Fatalf("skip did not advance: %q", next)
 	}
 	u, _ := store.UserByPhone(phone)
@@ -122,10 +173,10 @@ func TestSkipAndDeclineSettleWithoutAnswering(t *testing.T) {
 	}
 
 	postSMS(t, srv, phone, "prefer not to say")
-	sess, _ := store.EnsureSession(u, "sms")
+	sess, _ := store.EnsureSession(u, "sms", FlowOnboarding)
 	items, _ := store.Checklist(u.ID, sess.ID)
-	if items[0].Status != StatusSkipped || items[1].Status != StatusDeclined {
-		t.Fatalf("statuses wrong: %s / %s", items[0].Status, items[1].Status)
+	if items[1].Status != StatusSkipped || items[2].Status != StatusDeclined {
+		t.Fatalf("statuses wrong: %s / %s", items[1].Status, items[2].Status)
 	}
 }
 
@@ -137,26 +188,26 @@ func TestChecklistToolWebhooksEnforceOrderAndIdempotency(t *testing.T) {
 
 	var first map[string]any
 	toolPost(t, srv, "/tools/next_question", map[string]any{"phone": phone, "channel": "call"}, &first)
-	if first["question"] != "What type of events do you like to go to?" {
+	if first["question"] != onboardingTemplate[0].Prompt || first["flow"] != FlowOnboarding {
 		t.Fatalf("agent got the wrong question: %#v", first)
 	}
 
 	// Answering question two first is refused.
 	code, _ := toolPostCode(t, srv, "/tools/save_answer", map[string]any{
-		"phone": phone, "channel": "call", "key": "event_time", "answer": "evenings",
+		"phone": phone, "channel": "call", "key": "event_types", "answer": "conferences",
 	})
 	if code != 409 {
 		t.Fatalf("out-of-order answer should conflict, got %d", code)
 	}
 
 	body := map[string]any{
-		"phone": phone, "channel": "call", "key": "event_types",
-		"answer": "conferences", "idempotency_key": "call-1-q1",
+		"phone": phone, "channel": "call", "key": "name",
+		"answer": "Sam", "idempotency_key": "call-1-q1",
 	}
 	var saved map[string]any
 	toolPost(t, srv, "/tools/save_answer", body, &saved)
 	next, _ := saved["next"].(map[string]any)
-	if next == nil || next["question"] != "What time do you like to go to events?" {
+	if next == nil || next["question"] != onboardingTemplate[1].Prompt {
 		t.Fatalf("agent not advanced: %#v", saved)
 	}
 
@@ -164,9 +215,9 @@ func TestChecklistToolWebhooksEnforceOrderAndIdempotency(t *testing.T) {
 	var replay map[string]any
 	toolPost(t, srv, "/tools/save_answer", body, &replay)
 	u, _ := store.UserByPhone(phone)
-	sess, _ := store.EnsureSession(u, "call")
+	sess, _ := store.EnsureSession(u, "call", FlowOnboarding)
 	items, _ := store.Checklist(u.ID, sess.ID)
-	if items[0].Answer != "conferences" || items[1].Status != StatusUnanswered {
+	if items[0].Answer != "Sam" || items[1].Status != StatusUnanswered {
 		t.Fatalf("retry mutated state: %#v", items)
 	}
 }

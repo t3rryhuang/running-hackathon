@@ -138,9 +138,12 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
+	// The web form exists only to reach the person: a number and how they want
+	// to be contacted. Everything about them - their name, what they are into,
+	// how often to check in - is asked in the conversation itself, so nothing
+	// here is a substitute for them telling us.
 	phone := normalisePhone(r.FormValue("phone"))
 	channel := r.FormValue("channel")
-	frequency := r.FormValue("frequency")
 
 	if !e164.MatchString(phone) {
 		if wantsJSON(r) {
@@ -156,19 +159,16 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	if channel != "call" && channel != "sms" {
 		channel = "sms"
 	}
-	if !validFrequency(frequency) {
-		frequency = "daily"
-	}
 
-	u := &User{
-		Phone:     phone,
-		Name:      strings.TrimSpace(r.FormValue("name")),
-		Channel:   channel,
-		Frequency: frequency,
-		ICSURL:    strings.TrimSpace(r.FormValue("ics_url")),
-		Interests: normaliseInterests(r.FormValue("interests")),
+	u, err := s.store.EnsureUser(phone)
+	if err == nil {
+		u.Channel = channel
+		if ics := strings.TrimSpace(r.FormValue("ics_url")); ics != "" {
+			u.ICSURL = ics
+		}
+		err = s.store.UpsertUser(u)
 	}
-	if err := s.store.UpsertUser(u); err != nil {
+	if err != nil {
 		log.Printf("signup: %v", err)
 		if wantsJSON(r) {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "could not save signup"})
@@ -179,27 +179,20 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if channel == "sms" {
-		body := "Hey, I'm CheckIn - your daily journalling companion. Reply to this message to start your first check-in."
-		if u.Name != "" {
-			body = "Hey " + u.Name + ", I'm CheckIn - your daily journalling companion. Reply to this message to start your first check-in."
-		}
-		if err := s.tel.SendSMS(phone, body); err != nil {
-			log.Printf("signup: welcome sms failed: %v", err)
-		} else {
-			_ = s.store.AddMessage(u.ID, "assistant", body)
+		if err := s.startSMSOnboarding(u); err != nil {
+			log.Printf("signup: opening sms failed: %v", err)
 		}
 	}
 
 	if wantsJSON(r) {
-		// The wizard drives steps 4 and 5 client-side, so it only needs the
-		// stored record back rather than a rendered page.
+		// The wizard hands over to the conversation once the number is
+		// stored, so it only needs the record back rather than a page.
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":        true,
 			"phone":     phone,
 			"name":      u.Name,
 			"channel":   channel,
-			"frequency": frequency,
-			"interests": u.Interests,
+			"onboarded": u.Onboarded(),
 			"journal":   "/journal?phone=" + url.QueryEscape(phone),
 		})
 		return
@@ -207,7 +200,7 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "confirm.html", map[string]any{
 		"Phone":     phone,
 		"Channel":   channel,
-		"Frequency": frequency,
+		"Frequency": u.Frequency,
 	})
 }
 
@@ -228,14 +221,6 @@ func (s *Server) handleCall(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "user lookup failed"})
 		return
-	}
-	// The wizard asks for a name before a number, so a call placed straight
-	// after signup can greet the user by name even for a brand new record.
-	if name := strings.TrimSpace(fields["name"]); name != "" && u.Name == "" {
-		u.Name = name
-		if err := s.store.UpsertUser(u); err != nil {
-			log.Printf("call: save name: %v", err)
-		}
 	}
 	if err := s.placeCall(u); err != nil {
 		log.Printf("call: %v", err)
@@ -412,12 +397,27 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 }
 
 // TriggerCheckin sends the opening check-in over the user's chosen channel.
+// Somebody who has not been introduced yet gets the introduction instead: a
+// check-in question would assume a relationship that does not exist.
 func (s *Server) TriggerCheckin(u *User) error {
 	defer func() { _ = s.store.MarkTriggered(u.ID, time.Now()) }()
 	if u.Channel == "call" {
 		return s.placeCall(u)
 	}
+	if !u.Onboarded() {
+		return s.startSMSOnboarding(u)
+	}
 	body := s.openingMessage(u)
+	if err := s.tel.SendSMS(u.Phone, body); err != nil {
+		return err
+	}
+	return s.store.AddMessage(u.ID, "assistant", body)
+}
+
+// startSMSOnboarding texts the first onboarding question and records that it
+// was asked, so the reply is matched to the question they were actually sent.
+func (s *Server) startSMSOnboarding(u *User) error {
+	body := s.brain.OnboardingTurn(u, "sms", "")
 	if err := s.tel.SendSMS(u.Phone, body); err != nil {
 		return err
 	}
@@ -429,7 +429,7 @@ func (s *Server) TriggerCheckin(u *User) error {
 // world.
 func (s *Server) callerContext(u *User) CallerContext {
 	var items []ChecklistItem
-	if sess, err := s.store.EnsureSession(u, "call"); err == nil {
+	if sess, err := s.store.EnsureSession(u, "call", FlowFor(u)); err == nil {
 		items, _ = s.store.Checklist(u.ID, sess.ID)
 	}
 	return buildCallerContext(u.Phone, u, items)

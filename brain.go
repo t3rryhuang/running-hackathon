@@ -225,6 +225,14 @@ func (b *Brain) runTool(u *User, name string, input json.RawMessage) string {
 	case "accept_suggestion":
 		confirmation, err := b.AcceptSuggestion(u)
 		if err != nil {
+			// Nothing on offer: if they are already signed up for something,
+			// say so rather than letting the model offer a fresh event.
+			if accepted, aerr := b.store.AcceptedSuggestions(u.ID); aerr == nil && len(accepted) > 0 {
+				last := accepted[len(accepted)-1]
+				return jsonStr(map[string]any{"ok": true, "already_signed_up": true, "confirmation": fmt.Sprintf(
+					"They are already on the list for %s on %s.",
+					last.Event.Title, last.Event.StartsAt.In(londonLoc).Format("Mon 2 Jan at 15:04"))})
+			}
 			return jsonStr(map[string]any{"ok": false, "error": "no open suggestion"})
 		}
 		return jsonStr(map[string]any{"ok": true, "confirmation": confirmation})

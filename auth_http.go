@@ -125,23 +125,7 @@ func (s *Server) handleAuthRequest(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Use the international format, like +447700900123."})
 		return
 	}
-	if !s.loginLimiter.allow(clientIP(r), time.Now()) {
-		s.store.RecordAuthEvent(phone, 0, "code_rate_limited", "ip")
-		writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "Too many attempts. Try again in a few minutes."})
-		return
-	}
-	// The per-number throttles are applied before the number is looked up, so
-	// a registered number and an unregistered one are throttled identically.
-	// Doing it the other way round would turn 429-versus-200 into an oracle for
-	// who has an account.
-	if ok, wait := s.codeCooldown.take(phone, time.Now()); !ok {
-		s.store.RecordAuthEvent(phone, 0, "code_rate_limited", "cooldown")
-		s.tooManyCodes(w, "You just asked for a code. Give it a moment before trying again.", wait)
-		return
-	}
-	if ok, wait := s.codeBudget.take(phone, time.Now()); !ok {
-		s.store.RecordAuthEvent(phone, 0, "code_rate_limited", "phone")
-		s.tooManyCodes(w, "Too many codes requested for that number. Try again shortly.", wait)
+	if !s.throttleCode(w, r, phone) {
 		return
 	}
 	u, err := s.store.UserByPhone(phone)
@@ -177,6 +161,124 @@ func (s *Server) handleAuthRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	s.store.RecordAuthEvent(phone, u.ID, "code_sent", "")
 	writeJSON(w, http.StatusOK, generic)
+}
+
+// throttleCode applies the three limits every code request goes through and
+// reports whether the request may continue. The per-number throttles are
+// applied before the number is looked up, so a registered number and an
+// unregistered one are throttled identically: doing it the other way round
+// would turn 429-versus-200 into an oracle for who has an account.
+func (s *Server) throttleCode(w http.ResponseWriter, r *http.Request, phone string) bool {
+	if !s.loginLimiter.allow(clientIP(r), time.Now()) {
+		s.store.RecordAuthEvent(phone, 0, "code_rate_limited", "ip")
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "Too many attempts. Try again in a few minutes."})
+		return false
+	}
+	if ok, wait := s.codeCooldown.take(phone, time.Now()); !ok {
+		s.store.RecordAuthEvent(phone, 0, "code_rate_limited", "cooldown")
+		s.tooManyCodes(w, "You just asked for a code. Give it a moment before trying again.", wait)
+		return false
+	}
+	if ok, wait := s.codeBudget.take(phone, time.Now()); !ok {
+		s.store.RecordAuthEvent(phone, 0, "code_rate_limited", "phone")
+		s.tooManyCodes(w, "Too many codes requested for that number. Try again shortly.", wait)
+		return false
+	}
+	return true
+}
+
+// handleSignupStart is step one of signing up: the number is claimed and texted
+// a code. Unlike /auth/request it does not have to hide whether the number is
+// already registered - signing up reaches the same profile either way - so it
+// can be honest about a provider failure instead of leaving somebody waiting
+// for a text that is never coming. Nothing but the number exists on the profile
+// until the code is verified.
+func (s *Server) handleSignupStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	phone := normalisePhone(r.FormValue("phone"))
+	if !e164.MatchString(phone) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Include the country code, like +447700900123."})
+		return
+	}
+	// Already signed in on this number: there is nothing to verify again, and
+	// the page carries on from wherever the profile actually is.
+	if u := s.currentUser(r); u != nil && u.Phone == phone {
+		writeJSON(w, http.StatusOK, map[string]any{"verified": true, "step": stepFor(u), "name": u.DisplayName()})
+		return
+	}
+	if !s.throttleCode(w, r, phone) {
+		return
+	}
+	u, err := s.store.EnsureUser(phone)
+	if err != nil {
+		log.Printf("signup: claiming number: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "Could not start sign-up just now."})
+		return
+	}
+	code, err := s.store.IssueLoginCode(phone, time.Now())
+	if errors.Is(err, errRateLimited) {
+		s.store.RecordAuthEvent(phone, u.ID, "code_rate_limited", "phone")
+		s.tooManyCodes(w, "Too many codes requested for that number. Try again shortly.", loginCodeWindow)
+		return
+	}
+	if err != nil {
+		log.Printf("signup: issuing code: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "Could not send a code just now."})
+		return
+	}
+	if err := s.tel.SendSMS(phone, "Your CheckIn code is "+code+". It expires in 10 minutes."); err != nil {
+		log.Printf("signup: delivering code failed: %v", err)
+		if derr := s.store.DiscardLoginCode(phone); derr != nil {
+			log.Printf("signup: discarding undelivered code: %v", derr)
+		}
+		s.store.RecordAuthEvent(phone, u.ID, "code_delivery_failed", "")
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": "We couldn't text that number just now. Check it and try again."})
+		return
+	}
+	s.store.RecordAuthEvent(phone, u.ID, "code_sent", "signup")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"sent":       true,
+		"message":    "Code texted to " + maskPhone(phone) + ".",
+		"resend_in":  int(loginCodeCooldown.Seconds()),
+		"expires_in": int(loginCodeTTL.Seconds()),
+	})
+}
+
+// handleSetName is the step straight after verification. It writes to the
+// profile the session resolves to, never to a number supplied by the browser,
+// so a name cannot be put on somebody else's account.
+func (s *Server) handleSetName(w http.ResponseWriter, r *http.Request, u *User) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := s.store.SetName(u, r.FormValue("name")); err != nil {
+		if errors.Is(err, errUnusableAnswer) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Just the name you'd like me to use."})
+			return
+		}
+		log.Printf("signup: saving name: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "Could not save that just now."})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": u.DisplayName(), "step": stepFor(u)})
+}
+
+// stepFor says where in the sign-up somebody actually is, so a refresh resumes
+// rather than restarting. The channel choice is deliberately unreachable until
+// there is a name on the profile.
+func stepFor(u *User) string {
+	switch {
+	case u == nil:
+		return "phone"
+	case u.DisplayName() == "":
+		return "name"
+	default:
+		return "channel"
+	}
 }
 
 // tooManyCodes answers a throttled request with the wait, so the page can show
@@ -233,6 +335,9 @@ func (s *Server) handleAuthVerify(w http.ResponseWriter, r *http.Request) {
 		"signed_in": true,
 		"name":      u.DisplayName(),
 		"onboarded": u.Onboarded(),
+		// Where sign-up goes next: a profile with no name is asked for one
+		// before it is offered anything else.
+		"step": stepFor(u),
 	})
 }
 

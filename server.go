@@ -111,7 +111,9 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("/auth/request", timed("auth.request", s.handleAuthRequest))
 	mux.HandleFunc("/auth/verify", timed("auth.verify", s.handleAuthVerify))
 	mux.HandleFunc("/auth/logout", s.handleAuthLogout)
+	mux.HandleFunc("/signup/start", timed("signup.start", s.handleSignupStart))
 	mux.HandleFunc("/api/me", s.requireUser(s.handleMe))
+	mux.HandleFunc("/api/name", s.requireUser(s.handleSetName))
 	mux.HandleFunc("/api/transcripts", timed("api.transcripts", s.requireUser(s.handleTranscriptList)))
 	mux.HandleFunc("/api/transcripts/", s.requireUser(s.handleTranscriptItem))
 	// Tool webhooks land mid-conversation: their server time is dead air the
@@ -156,7 +158,18 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	s.render(w, "index.html", map[string]any{})
+	// The starting step comes from the server, not from anything the browser
+	// kept, so a refresh or a returning visit resumes where the profile
+	// actually is rather than starting again.
+	u := s.currentUser(r)
+	data := map[string]any{"Step": stepFor(u)}
+	if u != nil {
+		data["Name"] = u.DisplayName()
+		data["PhoneMasked"] = maskPhone(u.Phone)
+		data["Channel"] = u.Channel
+		data["Onboarded"] = u.Onboarded()
+	}
+	s.render(w, "index.html", data)
 }
 
 func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
@@ -168,36 +181,30 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
-	// The web form exists only to reach the person: a number and how they want
-	// to be contacted. Everything about them - their name, what they are into,
-	// how often to check in - is asked in the conversation itself, so nothing
-	// here is a substitute for them telling us.
-	phone := normalisePhone(r.FormValue("phone"))
-	channel := r.FormValue("channel")
-
-	if !e164.MatchString(phone) {
-		if wantsJSON(r) {
-			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "Phone must be in E.164 format, e.g. +447700900123"})
-			return
-		}
-		s.renderStatus(w, http.StatusBadRequest, "index.html", map[string]any{
-			"Error": "Phone must be in E.164 format, e.g. +447700900123",
-			"Form":  r.Form,
-		})
+	// Choosing a channel is the last step of signing up, and it acts on the
+	// profile the session resolves to - never on a number posted by the
+	// browser. The number was proved by code before this point and the name was
+	// asked for straight after, so neither is taken on trust here.
+	u := s.currentUser(r)
+	if u == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "Verify your number first.", "step": "phone"})
 		return
 	}
+	if u.DisplayName() == "" {
+		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "Tell me your name first.", "step": "name"})
+		return
+	}
+	phone := u.Phone
+	channel := r.FormValue("channel")
 	if channel != "call" && channel != "sms" {
 		channel = "sms"
 	}
 
-	u, err := s.store.EnsureUser(phone)
-	if err == nil {
-		u.Channel = channel
-		if ics := strings.TrimSpace(r.FormValue("ics_url")); ics != "" {
-			u.ICSURL = ics
-		}
-		err = s.store.UpsertUser(u)
+	u.Channel = channel
+	if ics := strings.TrimSpace(r.FormValue("ics_url")); ics != "" {
+		u.ICSURL = ics
 	}
+	err := s.store.UpsertUser(u)
 	if err != nil {
 		log.Printf("signup: %v", err)
 		if wantsJSON(r) {
@@ -243,6 +250,14 @@ func (s *Server) handleCall(w http.ResponseWriter, r *http.Request) {
 	}
 	fields := requestFields(r)
 	phone := normalisePhone(fields["phone"])
+	// The sign-up page asks for a call without naming a number: after
+	// verification the session already says whose number it is, so the browser
+	// does not have to hold it and cannot ask us to ring somebody else.
+	if phone == "" {
+		if signedIn := s.currentUser(r); signedIn != nil {
+			phone = signedIn.Phone
+		}
+	}
 	if !e164.MatchString(phone) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "phone must be E.164, e.g. +447700900123"})
 		return

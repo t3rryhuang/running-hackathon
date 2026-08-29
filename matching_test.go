@@ -149,21 +149,16 @@ func TestOnboardingCapturesInterestsThroughToRecommendation(t *testing.T) {
 	srv, store, tel, _ := newTestServer(t, nil)
 	phone := "+447700900150"
 
-	form := url.Values{"phone": {phone}, "channel": {"sms"}}
-	req := httptest.NewRequest(http.MethodPost, "/signup", strings.NewReader(form.Encode()))
-	req.Header.Set("content-type", "application/x-www-form-urlencoded")
-	req.Header.Set("accept", "application/json")
-	rec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
+	cookie := webSignedUp(t, srv, tel, phone, "Keanu")
+	if rec := postForm(t, srv, "/signup", url.Values{"channel": {"sms"}}, cookie); rec.Code != http.StatusOK {
 		t.Fatalf("signup status %d: %s", rec.Code, rec.Body.String())
 	}
-	// The website's only job is to open the conversation.
-	if len(tel.sms) != 1 || !strings.Contains(tel.sms[0], onboardingTemplate[0].Prompt) {
-		t.Fatalf("introduction not opened over sms: %#v", tel.sms)
+	// The website's job ends at opening the conversation, and the conversation
+	// picks up from what the website already asked.
+	if len(tel.sms) != 2 || strings.Contains(tel.sms[1], onboardingTemplate[0].Prompt) {
+		t.Fatalf("introduction not opened past the name: %#v", tel.sms)
 	}
 
-	postSMS(t, srv, phone, "Keanu")
 	postSMS(t, srv, phone, "Hackathons, AI")
 
 	u, err := store.UserByPhone(phone)
@@ -178,19 +173,16 @@ func TestOnboardingCapturesInterestsThroughToRecommendation(t *testing.T) {
 	}
 
 	// Coming back through the website does not wipe what they told us.
-	req = httptest.NewRequest(http.MethodPost, "/signup", strings.NewReader(form.Encode()))
-	req.Header.Set("content-type", "application/x-www-form-urlencoded")
-	req.Header.Set("accept", "application/json")
-	srv.Routes().ServeHTTP(httptest.NewRecorder(), req)
+	postForm(t, srv, "/signup", url.Values{"channel": {"sms"}}, cookie)
 	u, _ = store.UserByPhone(phone)
 	if u.Interests != "hackathons, ai" || u.Name != "Keanu" {
 		t.Fatalf("returning through the website reset the profile: %#v", u)
 	}
 
 	// And the agent context exposes them.
-	req = httptest.NewRequest(http.MethodPost, "/tools/get_context", strings.NewReader(`{"phone":"+447700900150"}`))
+	req := httptest.NewRequest(http.MethodPost, "/tools/get_context", strings.NewReader(`{"phone":"+447700900150"}`))
 	req.Header.Set("X-Webhook-Secret", "s3cret")
-	rec = httptest.NewRecorder()
+	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, req)
 	if !strings.Contains(rec.Body.String(), "hackathons, ai") {
 		t.Fatalf("context missing interests: %s", rec.Body.String())

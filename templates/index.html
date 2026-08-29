@@ -1,63 +1,86 @@
 {{define "index.html"}}{{template "head" .}}
-<div class="progress" id="progress" role="progressbar" aria-label="Signup progress" aria-valuemin="1" aria-valuenow="1" aria-valuemax="3">
+{{/* Which steps exist in the page at all is decided here, on the server, from
+     the profile the session resolves to. The channel choice is not rendered
+     until a name is on file, so it cannot be shown, clicked or scripted before
+     its turn, and a refresh resumes at the real step rather than the first. */}}
+<div class="progress" id="progress" role="progressbar" aria-label="Sign-up progress" aria-valuemin="1" aria-valuenow="1" aria-valuemax="4">
   <span class="fill" id="progress-fill"></span>
 </div>
-<p class="sr-only" id="progress-label" aria-live="polite">Step 1 of 3</p>
+<p class="sr-only" id="progress-label" aria-live="polite">Step 1 of 4</p>
 
 <div class="err" id="err" role="alert" hidden></div>
+<p class="sr-only" id="live" aria-live="polite"></p>
 
 <noscript>
-  <p class="sub">The step-by-step version needs JavaScript. This form does the same thing.</p>
-  <form method="post" action="/signup">
-    <label for="ns-phone">Your number, country code included</label>
-    <input type="tel" id="ns-phone" name="phone" placeholder="+447700900123" required>
-    <label for="ns-channel">Call or text</label>
-    <select id="ns-channel" name="channel">
-      <option value="sms">Text me</option>
-      <option value="call">Call me</option>
-    </select>
-    <button type="submit">Start</button>
-  </form>
+  <p class="sub">Signing up needs JavaScript, because we text you a code to check the number is yours. <a href="/login">Signing in</a> works the same way.</p>
 </noscript>
 
-<section class="step on" data-step="0">
+{{if eq .Step "phone"}}
+<section class="step on" data-step="0" data-progress="1">
   <h1>What's your number?</h1>
-  <p class="sub">That's all I need here - the rest we'll talk about. Country code included.</p>
+  <p class="sub">We'll text you a code to check it's yours. Country code included.</p>
   <label for="phone">Mobile number</label>
   <input type="tel" id="phone" class="big" placeholder="+447700900123" inputmode="tel" autocomplete="tel" autofocus>
-  <button id="phone-next">Continue</button>
+  <button id="phone-next">Send me a code</button>
+  <p class="hint">Already signed up? <a href="/login">Sign in</a>.</p>
 </section>
 
-<section class="step" data-step="1">
-  <h1>Call or text?</h1>
+<section class="step" data-step="1" data-progress="2" hidden>
+  <h1>Enter your code</h1>
+  <p class="sub" id="code-sub">Six digits, texted to your phone. It expires in ten minutes.</p>
+  <label for="code">Verification code</label>
+  <input type="text" id="code" class="big" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*" maxlength="6">
+  <button id="code-next">Verify</button>
+  <button type="button" class="quiet" id="resend" disabled>Send another code</button>
+  <p class="hint"><a href="#" id="wrong-number">Wrong number?</a></p>
+</section>
+{{end}}
+
+{{if eq .Step "name"}}
+<section class="step on" data-step="0" data-progress="3">
+  <h1>What should I call you?</h1>
+  <p class="sub">{{if .PhoneMasked}}{{.PhoneMasked}} is verified.{{end}} Just your first name is fine.</p>
+  <label for="name">Your name</label>
+  <input type="text" id="name" class="big" autocomplete="given-name" maxlength="60" autofocus>
+  <button id="name-next">Continue</button>
+</section>
+{{end}}
+
+{{if eq .Step "channel"}}
+<section class="step on" data-step="0" data-progress="4">
+  <h1>{{if .Name}}Nice to meet you, {{.Name}}. {{end}}Call or text?</h1>
   <p class="sub">However you'd rather be reached. We'll get to know each other there.</p>
-  <button class="choice" data-channel="call" aria-pressed="false">
-    <span class="glyph" aria-hidden="true">&#9742;</span>
-    <span class="copy"><strong>Call me</strong><span class="desc">A short voice conversation</span></span>
-  </button>
-  <button class="choice" data-channel="sms" aria-pressed="false">
-    <span class="glyph" aria-hidden="true">&#9993;</span>
-    <span class="copy"><strong>Text me</strong><span class="desc">A conversation over SMS</span></span>
-  </button>
+  <div class="choices">
+    <button class="choice" data-channel="call" aria-pressed="false">
+      <span class="glyph" aria-hidden="true">&#9742;</span>
+      <span class="copy"><strong>Call me</strong><span class="desc">A short voice conversation</span></span>
+    </button>
+    <button class="choice" data-channel="sms" aria-pressed="false">
+      <span class="glyph" aria-hidden="true">&#9993;</span>
+      <span class="copy"><strong>Text me</strong><span class="desc">A conversation over SMS</span></span>
+    </button>
+  </div>
 </section>
 
-<section class="step" data-step="2">
+<section class="step" data-step="1" data-progress="4" hidden>
   <h1>You're in.</h1>
   <p class="sub" id="done-sub">Talk soon.</p>
   <button id="call-now" hidden>Call me now</button>
-  <a class="btn-link" id="journal-link" href="/journal">Open your journal</a>
+  <a class="btn-link" href="/dashboard">Open your dashboard</a>
   <p class="hint" id="sim-status"></p>
 </section>
+{{end}}
 
 <script>
 (function () {
-  var state = { phone: "", channel: "sms" };
   var steps = document.querySelectorAll(".step");
   var err = document.getElementById("err");
+  var live = document.getElementById("live");
   var bar = document.getElementById("progress");
   var fill = document.getElementById("progress-fill");
   var label = document.getElementById("progress-label");
-  var total = steps.length;
+  var total = 4;
+  var phone = "";
 
   function show(n) {
     steps.forEach(function (s, i) {
@@ -65,10 +88,10 @@
       s.classList.toggle("on", on);
       s.hidden = !on;
     });
-    fill.style.width = Math.round(((n + 1) / total) * 100) + "%";
-    bar.setAttribute("aria-valuenow", String(n + 1));
-    bar.setAttribute("aria-valuemax", String(total));
-    label.textContent = "Step " + (n + 1) + " of " + total;
+    var at = Number(steps[n].dataset.progress || 1);
+    fill.style.width = Math.round((at / total) * 100) + "%";
+    bar.setAttribute("aria-valuenow", String(at));
+    label.textContent = "Step " + at + " of " + total;
     err.hidden = true;
     var h = steps[n].querySelector("h1");
     if (h) { h.setAttribute("tabindex", "-1"); h.focus({ preventScroll: true }); }
@@ -83,78 +106,191 @@
     btn.disabled = on;
     if (on) { btn.setAttribute("aria-busy", "true"); } else { btn.removeAttribute("aria-busy"); }
   }
-  function pick(selector, el) {
-    document.querySelectorAll(selector).forEach(function (b) {
-      b.setAttribute("aria-pressed", b === el ? "true" : "false");
-    });
-  }
-
-  document.getElementById("phone-next").addEventListener("click", function () {
-    var field = document.getElementById("phone");
-    var v = field.value.replace(/[\s\-().]/g, "");
-    if (!/^\+[1-9]\d{7,14}$/.test(v)) {
-      return fail("Include the country code, like +447700900123.", field);
-    }
-    field.removeAttribute("aria-invalid");
-    state.phone = v;
-    show(1);
-  });
-  document.getElementById("phone").addEventListener("keydown", function (e) {
-    if (e.key === "Enter") { document.getElementById("phone-next").click(); }
-  });
-
-  document.querySelectorAll("[data-channel]").forEach(function (b) {
-    b.addEventListener("click", function () {
-      state.channel = b.dataset.channel;
-      pick("[data-channel]", b);
-      signup(b);
-    });
-  });
-
-  function signup(btn) {
-    busy(btn, true);
-    fetch("/signup", {
+  function post(path, body) {
+    return fetch(path, {
       method: "POST",
       headers: { "Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams(state)
-    }).then(function (r) { return r.json(); }).then(function (j) {
-      busy(btn, false);
-      if (!j.ok) { return fail(j.error || "Something went wrong."); }
-      document.getElementById("journal-link").href = j.journal;
-      var call = document.getElementById("call-now");
-      if (state.channel === "call") {
-        call.hidden = false;
-        document.getElementById("done-sub").textContent =
-          "Tap below and I'll ring " + state.phone + " to get to know you.";
-      } else {
-        call.hidden = true;
-        document.getElementById("done-sub").textContent =
-          "Check your phone - I've texted " + state.phone + ". Reply and we'll take it from there.";
+      body: new URLSearchParams(body)
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        return { status: r.status, body: j };
+      });
+    });
+  }
+  function el(id) { return document.getElementById(id); }
+
+  if (steps.length) { show(0); }
+
+  // Step 1 and 2: the number, then the code that proves it.
+  if (el("phone-next")) {
+    var cooldown = 0, ticker = null;
+    function countdown(seconds) {
+      var resend = el("resend");
+      cooldown = seconds;
+      clearInterval(ticker);
+      function tick() {
+        if (cooldown <= 0) {
+          clearInterval(ticker);
+          resend.disabled = false;
+          resend.textContent = "Send another code";
+          return;
+        }
+        resend.disabled = true;
+        resend.textContent = "Send another code in " + cooldown + "s";
+        cooldown--;
       }
-      show(2);
-    }).catch(function () {
-      busy(btn, false);
-      fail("Could not reach the server.");
+      tick();
+      ticker = setInterval(tick, 1000);
+    }
+
+    function requestCode(btn, number) {
+      busy(btn, true);
+      return post("/signup/start", { phone: number }).then(function (res) {
+        busy(btn, false);
+        if (res.body.verified) { return location.reload(); }
+        if (res.status !== 200) {
+          return fail(res.body.error || "Could not send a code just now.");
+        }
+        phone = number;
+        el("code-sub").textContent = res.body.message + " It expires in ten minutes.";
+        live.textContent = res.body.message;
+        countdown(res.body.resend_in || 30);
+        show(1);
+        el("code").focus();
+      }).catch(function () {
+        busy(btn, false);
+        fail("Could not reach the server.");
+      });
+    }
+
+    el("phone-next").addEventListener("click", function () {
+      var field = el("phone");
+      var v = field.value.replace(/[\s\-().]/g, "");
+      if (!/^\+[1-9]\d{7,14}$/.test(v)) {
+        return fail("Include the country code, like +447700900123.", field);
+      }
+      field.removeAttribute("aria-invalid");
+      requestCode(this, v);
+    });
+    el("phone").addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { el("phone-next").click(); }
+    });
+    el("resend").addEventListener("click", function () {
+      if (!phone) { return; }
+      requestCode(this, phone);
+    });
+    el("wrong-number").addEventListener("click", function (e) {
+      e.preventDefault();
+      phone = "";
+      show(0);
+      el("phone").focus();
+    });
+
+    el("code-next").addEventListener("click", function () {
+      var field = el("code");
+      var code = field.value.replace(/\D/g, "");
+      if (code.length !== 6) {
+        return fail("That code is six digits.", field);
+      }
+      field.removeAttribute("aria-invalid");
+      busy(this, true);
+      var btn = this;
+      post("/auth/verify", { phone: phone, code: code }).then(function (res) {
+        busy(btn, false);
+        if (res.status !== 200 || !res.body.signed_in) {
+          field.value = "";
+          // An invalid, expired, spent or throttled code all stop here: the
+          // page only moves on when the server says it issued a session.
+          return fail(res.body.error || "That code didn't work.", field);
+        }
+        // The next step comes from the server, so the page cannot skip ahead
+        // of what is actually stored.
+        location.reload();
+      }).catch(function () {
+        busy(btn, false);
+        fail("Could not reach the server.");
+      });
+    });
+    el("code").addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { el("code-next").click(); }
     });
   }
 
-  document.getElementById("call-now").addEventListener("click", function () {
-    var btn = this;
-    var status = document.getElementById("sim-status");
-    busy(btn, true);
-    status.textContent = "Dialling...";
-    fetch("/call", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phone: state.phone })
-    }).then(function (r) { return r.json(); }).then(function (j) {
-      busy(btn, false);
-      status.textContent = j.ok ? "Pick up - I'm calling you now." : (j.error || "Could not place the call.");
-    }).catch(function () {
-      busy(btn, false);
-      status.textContent = "Could not place the call.";
+  // Step 3: the name, saved against the verified profile before anything else
+  // is offered.
+  if (el("name-next")) {
+    el("name-next").addEventListener("click", function () {
+      var field = el("name");
+      var btn = this;
+      if (!field.value.trim()) {
+        return fail("Tell me what to call you.", field);
+      }
+      field.removeAttribute("aria-invalid");
+      busy(btn, true);
+      post("/api/name", { name: field.value }).then(function (res) {
+        busy(btn, false);
+        if (res.status === 401) { return location.assign("/login?expired=1"); }
+        if (res.status !== 200 || !res.body.ok) {
+          return fail(res.body.error || "Could not save that just now.", field);
+        }
+        location.reload();
+      }).catch(function () {
+        busy(btn, false);
+        fail("Could not reach the server.");
+      });
+    });
+    el("name").addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { el("name-next").click(); }
+    });
+  }
+
+  // Step 4: call or text. Only reachable once the name is stored, and the
+  // server checks that again rather than trusting the page.
+  document.querySelectorAll("[data-channel]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var channel = b.dataset.channel;
+      document.querySelectorAll("[data-channel]").forEach(function (o) {
+        o.setAttribute("aria-pressed", o === b ? "true" : "false");
+      });
+      busy(b, true);
+      post("/signup", { channel: channel }).then(function (res) {
+        busy(b, false);
+        if (res.status === 401) { return location.assign("/login?expired=1"); }
+        if (res.status !== 200 || !res.body.ok) {
+          return fail(res.body.error || "Something went wrong.");
+        }
+        var call = el("call-now");
+        if (channel === "call") {
+          call.hidden = false;
+          el("done-sub").textContent = "Tap below and I'll ring you to get to know you.";
+        } else {
+          call.hidden = true;
+          el("done-sub").textContent = "Check your phone - I've texted you. Reply and we'll take it from there.";
+        }
+        show(1);
+      }).catch(function () {
+        busy(b, false);
+        fail("Could not reach the server.");
+      });
     });
   });
+
+  if (el("call-now")) {
+    el("call-now").addEventListener("click", function () {
+      var btn = this;
+      var status = el("sim-status");
+      busy(btn, true);
+      status.textContent = "Dialling...";
+      // No number is sent: the session says whose call this is.
+      post("/call", {}).then(function (res) {
+        busy(btn, false);
+        status.textContent = res.body.ok ? "Pick up - I'm calling you now." : (res.body.error || "Could not place the call.");
+      }).catch(function () {
+        busy(btn, false);
+        status.textContent = "Could not place the call.";
+      });
+    });
+  }
 })();
 </script>
 {{template "foot" .}}{{end}}

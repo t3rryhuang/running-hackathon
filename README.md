@@ -48,7 +48,7 @@ like to go — happens over SMS or on the call, one question at a time.
    domain queries, all scoped by `user_id`.
 3. `checklist.go` is the interview state machine; `signals.go` is the consented signal store
    (heart rate, location, calendar, commitments) with freshness, retention and deletion.
-4. `server.go` is the whole HTTP surface: landing page, `/signup`, `/call`, `/settings`,
+4. `server.go` is the whole HTTP surface: landing page, `/signup/start`, `/signup`, `/call`, `/settings`,
    `/sms`, `/journal`, `/login`, `/dashboard`, `/healthz`, `/metrics`, `/version`, `/tools/*`,
    `/api/*`, `/webhooks/elevenlabs`.
 5. `auth.go` / `auth_http.go` are phone + one-time-code sign-in and the session layer the
@@ -203,8 +203,11 @@ curl -s localhost:8090/version    # commit, build time, backend, uptime — drif
 
 # landing page, sign-up, and the demo control panel
 curl -s localhost:8090/
-# signup takes a number, a channel, and optionally a calendar — everything else is asked on the phone
-curl -s -X POST localhost:8090/signup --data-urlencode "phone=+447700900123" -d "channel=sms"
+# sign-up is number → code → name → channel; each step needs the one before it
+curl -s -X POST localhost:8090/signup/start --data-urlencode "phone=+447700900123"   # texts a code
+curl -s -X POST localhost:8090/auth/verify  --data-urlencode "phone=+447700900123" -d "code=123456" -c jar
+curl -s -X POST localhost:8090/api/name -b jar -d "name=Rae"      # session-scoped, no phone accepted
+curl -s -X POST localhost:8090/signup   -b jar -d "channel=sms"   # refused until the name is stored
 curl -s -X POST localhost:8090/call     -d '{"phone":"+447700900123"}'     # ring them now
 curl -s -X POST localhost:8090/settings -d '{"phone":"+447700900123","frequency":"weekdays"}'
 curl -s -X POST "localhost:8090/trigger?phone=%2B447700900123"             # simulate a check-in

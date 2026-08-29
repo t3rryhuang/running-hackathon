@@ -463,13 +463,9 @@ func TestSettingsChangesFrequency(t *testing.T) {
 // The wizard posts the same form but wants JSON back so it can drive the last
 // two steps client-side.
 func TestSignupReturnsJSONForWizard(t *testing.T) {
-	srv, _, _, _ := newTestServer(t, nil)
-	form := url.Values{"phone": {"+447700900145"}, "channel": {"call"}, "frequency": {"daily"}}
-	req := httptest.NewRequest(http.MethodPost, "/signup", strings.NewReader(form.Encode()))
-	req.Header.Set("content-type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-	rec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(rec, req)
+	srv, _, tel, _ := newTestServer(t, nil)
+	cookie := webSignedUp(t, srv, tel, "+447700900145", "Ines")
+	rec := postForm(t, srv, "/signup", url.Values{"channel": {"call"}, "frequency": {"daily"}}, cookie)
 
 	var out struct {
 		OK      bool   `json:"ok"`
@@ -484,15 +480,12 @@ func TestSignupReturnsJSONForWizard(t *testing.T) {
 	}
 }
 
-// The website captures a number and a channel and nothing else: the first
-// question is put to them in the conversation itself.
+// The website captures a verified number, a name and a channel, and nothing
+// else: everything after that is asked in the conversation itself.
 func TestSignupCreatesUserAndOpensTheConversation(t *testing.T) {
 	srv, store, tel, _ := newTestServer(t, nil)
-	form := url.Values{"phone": {"+44 7700 900129"}, "channel": {"sms"}}
-	req := httptest.NewRequest(http.MethodPost, "/signup", strings.NewReader(form.Encode()))
-	req.Header.Set("content-type", "application/x-www-form-urlencoded")
-	rec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(rec, req)
+	cookie := webSignedUp(t, srv, tel, "+44 7700 900129", "Tomas")
+	rec := postForm(t, srv, "/signup", url.Values{"channel": {"sms"}}, cookie)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
@@ -501,21 +494,19 @@ func TestSignupCreatesUserAndOpensTheConversation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("user not created: %v", err)
 	}
-	if u.Name != "" || u.Interests != "" || u.Onboarded() {
+	if u.Name != "Tomas" || u.Interests != "" || u.Onboarded() {
 		t.Fatalf("website assumed something about them: %#v", u)
 	}
-	if len(tel.sms) != 1 || !strings.Contains(tel.sms[0], onboardingTemplate[0].Prompt) {
-		t.Fatalf("introduction not opened: %#v", tel.sms)
+	// The code, then the opening message - and the introduction skips the name
+	// the website already collected.
+	if len(tel.sms) != 2 || strings.Contains(tel.sms[1], onboardingTemplate[0].Prompt) {
+		t.Fatalf("introduction not opened past the name: %#v", tel.sms)
 	}
 }
 
 func TestSignupRejectsNonE164(t *testing.T) {
 	srv, _, _, _ := newTestServer(t, nil)
-	form := url.Values{"phone": {"07700900130"}, "channel": {"sms"}}
-	req := httptest.NewRequest(http.MethodPost, "/signup", strings.NewReader(form.Encode()))
-	req.Header.Set("content-type", "application/x-www-form-urlencoded")
-	rec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(rec, req)
+	rec := postForm(t, srv, "/signup/start", url.Values{"phone": {"07700900130"}}, nil)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("want 400, got %d", rec.Code)
 	}
@@ -661,10 +652,10 @@ func TestWebFlowOnlyCollectsContactDetails(t *testing.T) {
 		t.Fatalf("status %d", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "What's your number?") || !strings.Contains(body, `data-channel="sms"`) {
+	if !strings.Contains(body, "What's your number?") {
 		t.Fatalf("web flow lost the contact step: %s", body)
 	}
-	for _, gone := range []string{"data-interest=", "data-frequency=", `id="name"`, "interests-other"} {
+	for _, gone := range []string{"data-interest=", "data-frequency=", "interests-other"} {
 		if strings.Contains(body, gone) {
 			t.Errorf("web flow still interviews the user: found %q", gone)
 		}

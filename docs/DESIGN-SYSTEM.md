@@ -137,5 +137,9 @@ with an ellipsis where the text is the content.
 - Errors are announced via `role="alert"`; the progress bar exposes its value.
 - Colour is never the sole signal for state.
 - `prefers-reduced-motion` is honoured.
-- The page works with fonts blocked, and with JavaScript disabled the plain
-  `/signup` form still submits (`<noscript>` reveals it).
+- The page works with fonts blocked. Sign-up itself needs JavaScript, because
+  the number is proved by a texted code before anything else is asked, so
+  `<noscript>` says so and points at `/login` rather than offering a form that
+  would skip verification.
+- The two channel cards sit in a `.choices` grid with a `--s-5` gap and `--s-5`
+  padding, so each is a 76px-plus target with clear space between them.

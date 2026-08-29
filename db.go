@@ -237,6 +237,36 @@ func (s *Store) SaveOnboarding(u *User, name, interests, frequency string) (miss
 	return missing, err
 }
 
+// SetName stores what someone has just said they are called, on the profile the
+// caller already resolved by verified number. An answer that is not a usable
+// name is refused rather than stored, and any open name question is settled at
+// the same time so the conversation does not go on to ask for what is now on
+// file.
+func (s *Store) SetName(u *User, name string) error {
+	if u == nil || u.ID == 0 {
+		return errors.New("no profile to name")
+	}
+	name = normaliseName(name)
+	if name == "" {
+		return errUnusableAnswer
+	}
+	now := time.Now().UTC()
+	err := s.tx(func(tx *sql.Tx) error {
+		if _, err := s.txExec(tx, `UPDATE users SET name=? WHERE id=?`, name, u.ID); err != nil {
+			return err
+		}
+		_, err := s.txExec(tx, `UPDATE checklist_items SET status=?, answer=?, source=?, answered_at=?
+			WHERE user_id=? AND item_key='name' AND status=?`,
+			StatusAnswered, name, SourceProfile, now, u.ID, StatusUnanswered)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	u.Name = name
+	return nil
+}
+
 // MarkOnboarded stamps that the introduction finished. It writes nothing else:
 // the answers were already persisted one at a time as they were given.
 func (s *Store) MarkOnboarded(u *User) error {

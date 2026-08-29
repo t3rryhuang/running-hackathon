@@ -167,13 +167,19 @@ button.ghost.is-loading::after { border-color: rgba(244, 237, 228, .25); border-
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* Choice cards ------------------------------------------------------ */
+/* Two cards side by side on a phone are easy to mis-tap, so they are spaced
+   with a gap rather than butted together, and each one is well past the 44px
+   touch minimum on its own. */
+.choices { display: grid; gap: var(--s-5); margin: var(--s-6) 0 var(--s-5); }
 button.choice {
-  display: flex; align-items: center; gap: var(--s-4);
-  text-align: left; width: 100%; margin: 0 0 var(--s-3);
-  padding: var(--s-4); background: var(--raised);
+  display: flex; align-items: center; gap: var(--s-5);
+  text-align: left; width: 100%; margin: 0 0 var(--s-4);
+  min-height: 76px; padding: var(--s-5);
+  background: var(--raised);
   border: 1px solid var(--line); border-radius: var(--r-md);
   color: var(--cream); font-weight: 500;
 }
+.choices button.choice { margin: 0; }
 button.choice:hover, button.choice:focus-visible { background: var(--raised-hi); border-color: var(--apricot); }
 button.choice .glyph {
   flex: 0 0 auto; width: 40px; height: 40px; border-radius: var(--r-full);

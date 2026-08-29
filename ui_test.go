@@ -21,14 +21,27 @@ func TestWizardAccessibleMarkup(t *testing.T) {
 		`role="progressbar"`,
 		`aria-valuenow="1"`,
 		`id="err" role="alert"`,
-		`data-channel="call" aria-pressed="false"`,
+		`aria-live="polite"`,
 		`<label for="phone">`,
 		`<noscript>`,
-		`action="/signup"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("wizard markup missing %q", want)
 		}
+	}
+}
+
+// The choice cards keep their pressed state and their accessible label once
+// they are reachable, which is only after a name is stored.
+func TestChoiceCardsAnnounceTheirPressedState(t *testing.T) {
+	srv, _, tel, _ := newTestServer(t, nil)
+	cookie := webSignedUp(t, srv, tel, "+447700900160", "Priya")
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), `data-channel="call" aria-pressed="false"`) {
+		t.Errorf("choice cards missing pressed state: %s", rec.Body.String())
 	}
 }
 

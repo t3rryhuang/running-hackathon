@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // ChecklistItem statuses. An item is only ever "answered" because the person
@@ -430,7 +431,7 @@ func normaliseName(answer string) string {
 		}
 	}
 	name = strings.Trim(name, ".!,")
-	if name == "" || len(strings.Fields(name)) > 4 || len(name) > 60 {
+	if name == "" || len(strings.Fields(name)) > 4 || len(name) > 60 || !strings.ContainsFunc(name, unicode.IsLetter) {
 		return ""
 	}
 	return name

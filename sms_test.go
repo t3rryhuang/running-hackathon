@@ -77,7 +77,7 @@ func (r *recordedVoice) numbers() []string {
 
 func newTestServer(t *testing.T, client AnthropicClient) (*Server, *Store, *recordedSMS, *recordedVoice) {
 	t.Helper()
-	store, err := OpenStore(filepath.Join(t.TempDir(), "test.db"))
+	store, err := OpenStore(Config{DatabasePath: filepath.Join(t.TempDir(), "test.db")})
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -97,6 +97,32 @@ func newTestServer(t *testing.T, client AnthropicClient) (*Server, *Store, *reco
 	return srv, store, tel, voice
 }
 
+// settleChecklist walks the interview to the end for a user, so a test can
+// exercise the journalling loop rather than the interview that precedes it.
+func settleChecklist(t *testing.T, store *Store, phone string) *User {
+	t.Helper()
+	u, err := store.EnsureUser(phone)
+	if err != nil {
+		t.Fatalf("ensure user: %v", err)
+	}
+	sess, err := store.EnsureSession(u.ID, "sms")
+	if err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	for {
+		item, err := store.NextChecklistItem(u.ID, sess.ID)
+		if err != nil {
+			t.Fatalf("next item: %v", err)
+		}
+		if item == nil {
+			return u
+		}
+		if _, err := store.RecordChecklistAnswer(u, sess.ID, item.Key, StatusSkipped, ""); err != nil {
+			t.Fatalf("settle %s: %v", item.Key, err)
+		}
+	}
+}
+
 func postSMS(t *testing.T, srv *Server, from, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	form := url.Values{"From": {from}, "Body": {body}}
@@ -112,6 +138,7 @@ func TestSMSWebhookRepliesWithTwiMLAndRemembersUser(t *testing.T) {
 		{Content: []ContentBlock{textBlock("Glad you made it out. What was the best part?")}},
 	}}
 	srv, store, _, _ := newTestServer(t, fake)
+	settleChecklist(t, store, "+447700900123")
 
 	rec := postSMS(t, srv, "+447700900123", "went for a run today")
 	if rec.Code != http.StatusOK {
@@ -155,6 +182,7 @@ func TestSMSToolLoopSavesCheckinAndOffersEvent(t *testing.T) {
 		{Content: []ContentBlock{textBlock("Sounds draining. There's a hack night on Wednesday - want me to put your name down?")}},
 	}}
 	srv, store, _, _ := newTestServer(t, fake)
+	settleChecklist(t, store, "+447700900124")
 
 	rec := postSMS(t, srv, "+447700900124", "everything broke today")
 	if rec.Code != http.StatusOK {
@@ -195,7 +223,8 @@ func TestSMSToolLoopSavesCheckinAndOffersEvent(t *testing.T) {
 }
 
 func TestSMSDegradesGracefullyWithoutAnthropic(t *testing.T) {
-	srv, _, _, _ := newTestServer(t, nil) // no API key configured
+	srv, store, _, _ := newTestServer(t, nil) // no API key configured
+	settleChecklist(t, store, "+447700900125")
 	rec := postSMS(t, srv, "+447700900125", "hello?")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("must not 500 without a model, got %d", rec.Code)

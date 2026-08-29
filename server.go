@@ -90,6 +90,15 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("/tools/save_checkin", timed("tool.save_checkin", s.toolAuth(s.toolSaveCheckin)))
 	mux.HandleFunc("/tools/suggest_event", timed("tool.suggest_event", s.toolAuth(s.toolSuggestEvent)))
 	mux.HandleFunc("/tools/accept_suggestion", timed("tool.accept_suggestion", s.toolAuth(s.toolAcceptSuggestion)))
+	// Checklist interview: the agent asks what next_question returns, verbatim,
+	// and reports what it heard back through save_answer.
+	mux.HandleFunc("/tools/next_question", timed("tool.next_question", s.toolAuth(s.toolNextQuestion)))
+	mux.HandleFunc("/tools/save_answer", timed("tool.save_answer", s.toolAuth(s.toolSaveAnswer)))
+	// Structured ingestion, consent and erasure.
+	mux.HandleFunc("/consent", timed("http.consent", s.toolAuth(s.handleConsent)))
+	mux.HandleFunc("/ingest", timed("http.ingest", s.toolAuth(s.handleIngest)))
+	mux.HandleFunc("/signals", timed("http.signals", s.toolAuth(s.handleSignals)))
+	mux.HandleFunc("/forget", timed("http.forget", s.toolAuth(s.handleForget)))
 	return mux
 }
 
@@ -270,19 +279,43 @@ func (s *Server) handleSMS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.verifyTwilio(r) {
+		log.Printf("sms: rejected an inbound with a bad Twilio signature")
+		http.Error(w, "bad signature", http.StatusForbidden)
+		return
+	}
+
 	u, err := s.store.EnsureUser(from)
 	if err != nil {
 		log.Printf("sms: ensure user: %v", err)
 		writeTwiML(w, fallbackReply)
 		return
 	}
-	if body == "" {
-		body = "(empty message)"
+	// A signed inbound message from this number is proof the person holds it.
+	if s.cfg.TwilioAuthToken != "" && !u.PhoneVerified() {
+		if err := s.store.MarkPhoneVerified(u.ID, "twilio_inbound_sms"); err == nil {
+			u, _ = s.store.UserByPhone(from)
+		}
 	}
-
+	// Twilio retries a webhook it thinks failed; MessageSid makes the retry
+	// replay the same answer instead of taking another conversation turn.
+	sid := r.FormValue("MessageSid")
+	if sid != "" {
+		first, cached, err := s.store.RememberWebhook("/sms", sid, u.ID, "")
+		if err == nil && !first {
+			writeTwiML(w, cached)
+			return
+		}
+	}
+	// An empty body stays empty: the checklist must see that nothing was said
+	// rather than a placeholder it could mistake for an answer.
 	ctx, cancel := context.WithTimeout(r.Context(), 40*time.Second)
 	defer cancel()
-	writeTwiML(w, s.brain.Reply(ctx, u, body))
+	reply := s.brain.Reply(ctx, u, body)
+	if sid != "" {
+		_ = s.store.StoreWebhookResponse("/sms", sid, reply)
+	}
+	writeTwiML(w, reply)
 }
 
 type twiMLMessage struct {

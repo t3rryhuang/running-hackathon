@@ -5,13 +5,20 @@ call, and CheckIn does a daily check-in with you. It remembers what you said las
 knows what was on your calendar, and when you sound low (or your day is empty) it offers
 you one real London tech event and signs you up.
 
-Single Go binary, SQLite, no CGO, no frontend framework. Built to run on a Raspberry Pi
-behind Caddy.
+Single Go binary, Postgres in production with a pure-Go SQLite fallback, no CGO, no
+frontend framework. Built to run on a Raspberry Pi behind Caddy.
+
+CheckIn only knows what it was told or what was explicitly connected: people are identified
+by verified phone number, preferences come from a checklist state machine rather than the
+model, and missing or stale signals read as unknown instead of being invented. See
+[docs/DATA-AND-CONSENT.md](docs/DATA-AND-CONSENT.md) for identity, tenant isolation,
+consent, freshness, retention and deletion.
 
 ## Architecture (10 lines)
 
-1. `main.go` boots config → SQLite store → calendar cache → brain → telephony → voice → HTTP mux + scheduler goroutine.
-2. `db.go` owns the schema (`users`, `checkins`, `events`, `suggestions`, `messages`) and seeds events from an `EventSource`.
+1. `main.go` boots config → store (Postgres if `DATABASE_URL`, else SQLite) → calendar cache → brain → telephony → voice → HTTP mux + scheduler + retention sweeper.
+2. `store_sql.go` is the backend: one migration list rendered per dialect (`?`→`$n`, portable primary keys, `RETURNING id`), run in a transaction at boot; `db.go` owns the domain queries, all scoped by `user_id`.
+2b. `checklist.go` is the preference interview state machine and `signals.go` the consented signal store (heart rate, location, calendar, commitments) with freshness, retention and deletion.
 3. `server.go` is the whole HTTP surface: wizard page, `/signup`, `/call`, `/settings`, `/sms`, `/journal`, `/trigger`, `/healthz`, `/metrics`, `/tools/*`.
 4. `matching.go` decides which event a user is offered: scored on their stated interests, the event's tags, city and timing, with reasons attached. Audience-restricted events are only offered to people who said they are in that audience, and when nothing clears the bar the tools return `no_match` instead of a weak suggestion.
 4. `brain.go` is the SMS brain: it builds a memory + calendar + suggestion-state preamble and runs an Anthropic tool-use loop.
@@ -56,8 +63,18 @@ make build      # → runhack-arm64 (CGO_ENABLED=0 GOOS=linux GOARCH=arm64)
 Tests / checks:
 
 ```bash
-make test   # unit tests: ICS parser, SMS webhook + tool loop, auth, scheduler
+make test   # unit tests: ICS parser, SMS webhook + tool loop, checklist, signals,
+            # cross-user isolation, Twilio signatures, webhook idempotency
 make vet
+```
+
+The Postgres integration test is skipped unless you point it at a throwaway database:
+
+```bash
+docker run -d --name runhack-pg-test -p 55432:5432 \
+  -e POSTGRES_USER=runhack -e POSTGRES_PASSWORD=test -e POSTGRES_DB=runhack postgres:16
+RUNHACK_TEST_DATABASE_URL='postgres://runhack:test@127.0.0.1:55432/runhack?sslmode=disable' \
+  go test -run TestPostgresBackend .
 ```
 
 ## Environment variables
@@ -79,7 +96,8 @@ make vet
 | `EVENTS_FEED_URL` | no | Live event feed (CSV or JSON, same columns as the export). Falls back to the embedded `events_live.csv` when unreachable |
 | `TAVILY_API_KEY` | no | Reserved for live event search; warns if unset |
 | `GCAL_ICS_URL` | no | Fallback calendar when a user has no `ics_url`; warns if unset |
-| `DATABASE_PATH` | no | Default `./data.db` |
+| `DATABASE_URL` | no | Postgres DSN. When set (and **exported** to the process), Postgres is used and `DATABASE_PATH` is ignored |
+| `DATABASE_PATH` | no | SQLite fallback, default `./data.db` |
 | `PORT` | no | Default `8090` |
 
 Missing *required* vars log a loud warning at startup and disable that feature; the service
@@ -128,6 +146,18 @@ curl -s -X POST localhost:8090/tools/save_onboarding   -H "$S" -d '{"phone":"+44
 curl -s -X POST localhost:8090/tools/save_checkin      -H "$S" -d '{"phone":"+447700900123","mood":4,"summary":"Good run, shipped the webhook","topics":"running, work"}'
 curl -s -X POST localhost:8090/tools/suggest_event     -H "$S" -d '{"phone":"+447700900123"}'
 curl -s -X POST localhost:8090/tools/accept_suggestion -H "$S" -d '{"phone":"+447700900123"}'
+
+# checklist interview over voice: one question at a time, answered in order
+curl -s -X POST localhost:8090/tools/next_question -H "$S" -d '{"phone":"+447700900123","channel":"call"}'
+curl -s -X POST localhost:8090/tools/save_answer   -H "$S" \
+  -d '{"phone":"+447700900123","channel":"call","key":"event_types","status":"answered","answer":"hackathons","idempotency_key":"conv1-q1"}'
+
+# consent, structured ingestion, inspection and erasure (same shared secret)
+curl -s -X POST localhost:8090/consent -H "$S" -d '{"phone":"+447700900123","scope":"heart_rate","granted":true,"source":"sms:yes"}'
+curl -s -X POST localhost:8090/ingest  -H "$S" \
+  -d '{"phone":"+447700900123","kind":"heart_rate","value":"58","unit":"bpm","source":"whoop","observed_at":"2026-08-29T09:12:00Z","idempotency_key":"whoop-1"}'
+curl -s -X POST localhost:8090/signals -H "$S" -d '{"phone":"+447700900123"}'
+curl -s -X POST localhost:8090/forget  -H "$S" -d '{"phone":"+447700900123"}'
 ```
 
 `/tools/*` returns `401 {"error":"unauthorized"}` without a matching `X-Webhook-Secret`
@@ -136,8 +166,10 @@ curl -s -X POST localhost:8090/tools/accept_suggestion -H "$S" -d '{"phone":"+44
 ## Deployment notes for the operator
 
 - `runhack-arm64` is a static binary; ship it with nothing else. Templates and `events_live.csv` are embedded.
+- Postgres: set `DATABASE_URL` in the unit's environment **and make sure it is exported to the process** (`EnvironmentFile=` plus the var in the file is enough; a shell-only value is not). Migrations run at boot and are idempotent, so first deploy needs no manual DDL — the role only needs `CREATE` in its own database. Without `DATABASE_URL` the service silently uses SQLite at `DATABASE_PATH`; the boot log line states which backend was chosen. There is no automatic SQLite→Postgres data migration: the first Postgres boot starts empty.
+- Twilio signature verification is on whenever `TWILIO_AUTH_TOKEN` is set, computed over the public HTTPS URL. Caddy must pass `X-Forwarded-Proto`/`Host` through (its defaults do), otherwise inbound `/sms` will 403.
 - Twilio: point the number's *A message comes in* webhook at `https://runhack.keanuc.net/sms` (HTTP POST).
-- ElevenLabs: register the five `/tools/*` URLs as agent tools with header `X-Webhook-Secret`, and give the agent a prompt that interviews un-onboarded callers (interests + frequency) before calling `save_onboarding`.
+- ElevenLabs: register the `/tools/*` URLs as agent tools with header `X-Webhook-Secret`. The agent must not improvise the interview: it calls `next_question`, reads the question back verbatim, waits for a real answer, and posts it to `save_answer` (`status` one of `answered`/`skipped`/`declined`). Answering out of order returns `409`.
 - Outbound calls go straight to `POST https://api.elevenlabs.io/v1/convai/twilio/outbound-call` with `agent_id` / `agent_phone_number_id` / `to_number`; the old Twilio TwiML path is gone. Nothing on the build box ever dialled that API — the request shape is covered by `TestElevenLabsOutboundRequestShape` only.
 - Scheduler slots are Europe/London: `daily` 09:00, `twice-daily` 09:00 + 20:00, `weekdays` 09:00 Mon–Fri.
 - `events_live.csv` is the Hackathon Radar export: 500 rows, of which 271 unique rows have a registration URL and get seeded (228 have no URL — there is nothing to sign anyone up to — and one is a duplicate `(title, starts_at)`).

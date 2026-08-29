@@ -122,7 +122,7 @@ func TestSkipAndDeclineSettleWithoutAnswering(t *testing.T) {
 	}
 
 	postSMS(t, srv, phone, "prefer not to say")
-	sess, _ := store.EnsureSession(u.ID, "sms")
+	sess, _ := store.EnsureSession(u, "sms")
 	items, _ := store.Checklist(u.ID, sess.ID)
 	if items[0].Status != StatusSkipped || items[1].Status != StatusDeclined {
 		t.Fatalf("statuses wrong: %s / %s", items[0].Status, items[1].Status)
@@ -164,7 +164,7 @@ func TestChecklistToolWebhooksEnforceOrderAndIdempotency(t *testing.T) {
 	var replay map[string]any
 	toolPost(t, srv, "/tools/save_answer", body, &replay)
 	u, _ := store.UserByPhone(phone)
-	sess, _ := store.EnsureSession(u.ID, "call")
+	sess, _ := store.EnsureSession(u, "call")
 	items, _ := store.Checklist(u.ID, sess.ID)
 	if items[0].Answer != "conferences" || items[1].Status != StatusUnanswered {
 		t.Fatalf("retry mutated state: %#v", items)

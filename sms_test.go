@@ -105,7 +105,7 @@ func settleChecklist(t *testing.T, store *Store, phone string) *User {
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	sess, err := store.EnsureSession(u.ID, "sms")
+	sess, err := store.EnsureSession(u, "sms")
 	if err != nil {
 		t.Fatalf("ensure session: %v", err)
 	}

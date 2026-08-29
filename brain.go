@@ -158,7 +158,7 @@ func (b *Brain) contextBlock(u *User) string {
 	sb.WriteString("</todays_calendar>\n")
 
 	sb.WriteString("<checklist>\n")
-	if sess, err := b.store.EnsureSession(u.ID, "sms"); err == nil {
+	if sess, err := b.store.EnsureSession(u, "sms"); err == nil {
 		items, _ := b.store.Checklist(u.ID, sess.ID)
 		for _, it := range items {
 			answer := it.Answer
@@ -207,7 +207,7 @@ const reAskLine = "I didn't catch an answer there, so I'll leave that one open. 
 // when the person actually said something. It reports false once the checklist
 // is settled, which hands the conversation to the model.
 func (b *Brain) interviewReply(u *User, inbound string) (string, bool) {
-	sess, err := b.store.EnsureSession(u.ID, "sms")
+	sess, err := b.store.EnsureSession(u, "sms")
 	if err != nil {
 		log.Printf("checklist: session for user %d: %v", u.ID, err)
 		return "", false

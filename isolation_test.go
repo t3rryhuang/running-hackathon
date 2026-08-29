@@ -52,11 +52,11 @@ func TestTwoUsersCannotSeeEachOther(t *testing.T) {
 	}
 
 	// Sessions and checklists are per user, and neither can be read across.
-	aSess, err := store.EnsureSession(alice.ID, "sms")
+	aSess, err := store.EnsureSession(alice, "sms")
 	if err != nil {
 		t.Fatalf("alice session: %v", err)
 	}
-	bSess, err := store.EnsureSession(bob.ID, "sms")
+	bSess, err := store.EnsureSession(bob, "sms")
 	if err != nil {
 		t.Fatalf("bob session: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestForgetUserErasesEverything(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("ingest: %v", err)
 	}
-	if _, err := store.EnsureSession(u.ID, "sms"); err != nil {
+	if _, err := store.EnsureSession(u, "sms"); err != nil {
 		t.Fatalf("session: %v", err)
 	}
 	if err := store.ForgetUser(u.ID); err != nil {

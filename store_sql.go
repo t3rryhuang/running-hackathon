@@ -172,6 +172,14 @@ CREATE TABLE IF NOT EXISTS webhook_events (
 )`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS webhook_events_unique ON webhook_events (endpoint, idempotency_key)`,
 	}},
+
+	// Where an answer came from. A value the person typed into the signup form
+	// is already known and must not be asked again on the phone, but it is not
+	// the same as one they said in this conversation, so it is recorded as
+	// such rather than silently presented as something they told the agent.
+	{Version: 6, Name: "answer_provenance", SQL: []string{
+		`ALTER TABLE checklist_items ADD COLUMN source {{text}} NOT NULL DEFAULT 'conversation'`,
+	}},
 }
 
 // Store is the persistence layer. Every user-scoped query takes a user id and

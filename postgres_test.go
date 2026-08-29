@@ -39,7 +39,7 @@ func TestPostgresBackend(t *testing.T) {
 		t.Fatalf("the same number produced a second user: %v %#v", err, same)
 	}
 
-	sess, err := store.EnsureSession(u.ID, "sms")
+	sess, err := store.EnsureSession(u, "sms")
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}

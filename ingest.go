@@ -106,7 +106,7 @@ func (s *Server) checklistUser(w http.ResponseWriter, r *http.Request) (*User, *
 	if channel == "" {
 		channel = "call"
 	}
-	sess, err := s.store.EnsureSession(u.ID, channel)
+	sess, err := s.store.EnsureSession(u, channel)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return nil, nil, req, false

@@ -24,20 +24,39 @@ type ChecklistQuestion struct {
 	Prompt string
 	// Persists names the user field this answer updates, if any.
 	Persists string
+	// KnownFrom reads the answer off the profile when the person already gave
+	// it somewhere else, such as the signup form. Nil when only the interview
+	// can supply it.
+	KnownFrom func(*User) string
+	// TTL is how long a previous answer stays usable. Zero means a stable
+	// preference that is never re-asked; a short TTL means the answer is about
+	// right now and goes stale, so it is asked again.
+	TTL time.Duration
 }
 
 // checklistTemplate is the standard interview, asked strictly in this order,
 // one question per turn.
 var checklistTemplate = []ChecklistQuestion{
-	{Key: "event_types", Prompt: "What type of events do you like to go to?", Persists: "interests"},
+	{Key: "event_types", Prompt: "What type of events do you like to go to?", Persists: "interests",
+		KnownFrom: func(u *User) string { return u.Interests }},
 	// Only the event types feed a denormalised user column, because matching
 	// reads it on every suggestion. The rest stay in checklist_items, where
 	// the answer keeps its status: a skipped question must never read back as
 	// a stated preference.
 	{Key: "event_time", Prompt: "What time do you like to go to events?"},
-	{Key: "evening_availability", Prompt: "Are you free for an event with like-minded people at 7 PM?"},
+	// Availability is about tonight, not about them, so last week's yes proves
+	// nothing and the question comes back.
+	{Key: "evening_availability", Prompt: "Are you free for an event with like-minded people at 7 PM?", TTL: 20 * time.Hour},
 	{Key: "notify_watch", Prompt: "What should we keep our eyes out for to notify you?"},
 }
+
+// SourceConversation is an answer the person gave in this interview;
+// SourceProfile is one they already gave on the signup form or an earlier
+// session, carried forward so it is never asked twice.
+const (
+	SourceConversation = "conversation"
+	SourceProfile      = "profile"
+)
 
 var errNotCurrentItem = errors.New("that is not the question currently on the table")
 
@@ -58,6 +77,7 @@ type ChecklistItem struct {
 	Prompt     string
 	Status     string
 	Answer     string
+	Source     string
 	AskedAt    *time.Time
 	AnsweredAt *time.Time
 }
@@ -69,10 +89,11 @@ func (c ChecklistItem) Settled() bool { return c.Status != StatusUnanswered }
 // EnsureSession returns the user's open session on this channel, creating it
 // (and its checklist) when there is none. A session belongs to exactly one
 // user and is never shared.
-func (s *Store) EnsureSession(userID int64, channel string) (*Session, error) {
-	if userID == 0 {
+func (s *Store) EnsureSession(u *User, channel string) (*Session, error) {
+	if u == nil || u.ID == 0 {
 		return nil, errors.New("session needs a user")
 	}
+	userID := u.ID
 	switch channel {
 	case "call", "sms", "web":
 	default:
@@ -89,6 +110,15 @@ func (s *Store) EnsureSession(userID int64, channel string) (*Session, error) {
 		return nil, err
 	}
 
+	now := time.Now().UTC()
+	// Resolved before the transaction opens: the SQLite pool is a single
+	// connection, so a read issued from inside the transaction would deadlock
+	// against it.
+	prefill := make([]carriedState, len(checklistTemplate))
+	for i, q := range checklistTemplate {
+		prefill[i] = s.carryForward(q, u, now)
+	}
+
 	var created Session
 	err = s.tx(func(tx *sql.Tx) error {
 		id, err := s.txInsert(tx, `INSERT INTO sessions (user_id, channel, state) VALUES (?,?,'open')`, userID, channel)
@@ -96,9 +126,15 @@ func (s *Store) EnsureSession(userID int64, channel string) (*Session, error) {
 			return err
 		}
 		for i, q := range checklistTemplate {
+			// Anything already on file - typed into the signup form, or said in
+			// an earlier session and still fresh - starts the session settled,
+			// which is what stops the agent asking for it a second time.
+			p := prefill[i]
 			if _, err := s.txExec(tx,
-				`INSERT INTO checklist_items (user_id, session_id, item_key, position, prompt, status) VALUES (?,?,?,?,?,?)`,
-				userID, id, q.Key, i, q.Prompt, StatusUnanswered); err != nil {
+				`INSERT INTO checklist_items (user_id, session_id, item_key, position, prompt, status, answer, source, answered_at)
+				VALUES (?,?,?,?,?,?,?,?,?)`,
+				userID, id, q.Key, i, q.Prompt, p.status, p.answer, p.source,
+				nullTimeIf(p.status != StatusUnanswered, now)); err != nil {
 				return err
 			}
 		}
@@ -111,6 +147,52 @@ func (s *Store) EnsureSession(userID int64, channel string) (*Session, error) {
 	return &created, nil
 }
 
+// carriedState is how a question starts a new session.
+type carriedState struct {
+	status string
+	answer string
+	source string
+}
+
+// carryForward decides what a new session already knows about a question: the
+// profile field the person filled in, their own answer from an earlier session
+// while it is still fresh, or a refusal they have already made. Anything else
+// starts unanswered and gets asked. Skips are deliberately not carried - "not
+// now" is about that conversation, not a standing preference.
+func (s *Store) carryForward(q ChecklistQuestion, u *User, now time.Time) carriedState {
+	if q.KnownFrom != nil {
+		if v := strings.TrimSpace(q.KnownFrom(u)); v != "" {
+			return carriedState{StatusAnswered, v, SourceProfile}
+		}
+	}
+	status, answer, answeredAt, ok := s.lastSettled(u.ID, q.Key)
+	if !ok {
+		return carriedState{StatusUnanswered, "", SourceConversation}
+	}
+	if q.TTL > 0 && now.Sub(answeredAt) > q.TTL {
+		return carriedState{StatusUnanswered, "", SourceConversation}
+	}
+	return carriedState{status, answer, SourceConversation}
+}
+
+// lastSettled is the most recent answer or refusal for a question, across this
+// user's sessions only.
+func (s *Store) lastSettled(userID int64, key string) (string, string, time.Time, bool) {
+	row := s.queryRow(`SELECT status, answer, answered_at FROM checklist_items
+		WHERE user_id=? AND item_key=? AND (status='declined' OR (status='answered' AND answer<>''))
+		ORDER BY answered_at DESC LIMIT 1`, userID, key)
+	var status, answer string
+	var at sql.NullTime
+	if err := row.Scan(&status, &answer, &at); err != nil {
+		return "", "", time.Time{}, false
+	}
+	return status, answer, at.Time, true
+}
+
+func nullTimeIf(cond bool, t time.Time) sql.NullTime {
+	return sql.NullTime{Time: t, Valid: cond}
+}
+
 // CloseSession ends a session so the next conversation starts a fresh
 // checklist. Tenant-scoped: the caller must own the session.
 func (s *Store) CloseSession(userID, sessionID int64) error {
@@ -121,7 +203,7 @@ func (s *Store) CloseSession(userID, sessionID int64) error {
 
 // Checklist returns every item for this user's session, in order.
 func (s *Store) Checklist(userID, sessionID int64) ([]ChecklistItem, error) {
-	rows, err := s.query(`SELECT id, user_id, session_id, item_key, position, prompt, status, answer, asked_at, answered_at
+	rows, err := s.query(`SELECT id, user_id, session_id, item_key, position, prompt, status, answer, source, asked_at, answered_at
 		FROM checklist_items WHERE user_id=? AND session_id=? ORDER BY position ASC`, userID, sessionID)
 	if err != nil {
 		return nil, err
@@ -131,7 +213,7 @@ func (s *Store) Checklist(userID, sessionID int64) ([]ChecklistItem, error) {
 	for rows.Next() {
 		var c ChecklistItem
 		var asked, answered sql.NullTime
-		if err := rows.Scan(&c.ID, &c.UserID, &c.SessionID, &c.Key, &c.Position, &c.Prompt, &c.Status, &c.Answer, &asked, &answered); err != nil {
+		if err := rows.Scan(&c.ID, &c.UserID, &c.SessionID, &c.Key, &c.Position, &c.Prompt, &c.Status, &c.Answer, &c.Source, &asked, &answered); err != nil {
 			return nil, err
 		}
 		if asked.Valid {
@@ -196,8 +278,8 @@ func (s *Store) RecordChecklistAnswer(u *User, sessionID int64, key, status, ans
 	now := time.Now().UTC()
 	err = s.tx(func(tx *sql.Tx) error {
 		if _, err := s.txExec(tx,
-			`UPDATE checklist_items SET status=?, answer=?, answered_at=?, updated_at=? WHERE id=? AND user_id=? AND session_id=?`,
-			status, answer, now, now, next.ID, u.ID, sessionID); err != nil {
+			`UPDATE checklist_items SET status=?, answer=?, source=?, answered_at=?, updated_at=? WHERE id=? AND user_id=? AND session_id=?`,
+			status, answer, SourceConversation, now, now, next.ID, u.ID, sessionID); err != nil {
 			return err
 		}
 		if status != StatusAnswered {
@@ -221,6 +303,7 @@ func (s *Store) RecordChecklistAnswer(u *User, sessionID int64, key, status, ans
 	}
 	next.Status = status
 	next.Answer = answer
+	next.Source = SourceConversation
 	next.AnsweredAt = &now
 	return next, nil
 }

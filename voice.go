@@ -24,6 +24,10 @@ type CallRequest struct {
 	To        string
 	Name      string
 	Onboarded bool
+	// Vars carries the caller's already-known profile - what they typed into
+	// the form, what they said in earlier sessions, and what is still missing -
+	// so the agent's first sentence uses it instead of asking for it again.
+	Vars map[string]string
 }
 
 // CallResult carries the identifiers ElevenLabs hands back, so the call can be
@@ -127,6 +131,21 @@ func hostPort(raw string) string {
 	return u.Hostname() + ":443"
 }
 
+// callVariables is the dynamic-variable map the agent's prompt interpolates.
+// Every value is either something on file for this number or the explicit
+// string "unknown", so the prompt never has a blank to fill in itself.
+func callVariables(cr CallRequest) map[string]string {
+	vars := map[string]string{
+		"user_name":  cr.Name,
+		"user_phone": cr.To,
+		"onboarded":  boolWord(cr.Onboarded),
+	}
+	for k, v := range cr.Vars {
+		vars[k] = v
+	}
+	return vars
+}
+
 // newRequest builds the outbound-call HTTP request. Split out from Call so the
 // body and headers can be asserted without a live key.
 func (v *elevenLabsVoice) newRequest(cr CallRequest) (*http.Request, error) {
@@ -134,11 +153,7 @@ func (v *elevenLabsVoice) newRequest(cr CallRequest) (*http.Request, error) {
 		AgentID:            v.agentID,
 		AgentPhoneNumberID: v.phoneID,
 		ToNumber:           cr.To,
-		ClientData: &clientInitialData{DynamicVariables: map[string]string{
-			"user_name":  cr.Name,
-			"user_phone": cr.To,
-			"onboarded":  boolWord(cr.Onboarded),
-		}},
+		ClientData:         &clientInitialData{DynamicVariables: callVariables(cr)},
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {

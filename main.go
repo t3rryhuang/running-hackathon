@@ -26,7 +26,11 @@ func main() {
 		log.Fatalf("open store %s: %v", cfg.DatabasePath, err)
 	}
 	defer store.Close()
-	if err := store.SeedEvents(NewCSVEventSource("events_live.csv", eventsCSV), *reseed); err != nil {
+	var events EventSource = NewCSVEventSource("events_live.csv", eventsCSV)
+	if cfg.EventsFeedURL != "" {
+		events = NewHTTPEventSource(cfg.EventsFeedURL, events)
+	}
+	if err := store.SeedEvents(events, *reseed); err != nil {
 		log.Printf("seed events: %v", err)
 	}
 

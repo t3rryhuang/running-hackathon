@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 )
@@ -74,5 +76,35 @@ func TestLiveExportParses(t *testing.T) {
 		if e.URL == "" || e.Title == "" || e.StartsAt.IsZero() {
 			t.Fatalf("incomplete event survived parsing: %#v", e)
 		}
+	}
+}
+
+func TestHTTPEventSourceReadsJSONAndFallsBack(t *testing.T) {
+	feed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`[{"title":"Feed Hack Night","starts_at":"2026-10-02 18:00:00+00","city":"London","url":"https://example.com/feed","tags":"hackathons"},
+{"title":"No Link","starts_at":"2026-10-02 18:00:00+00","city":"London","url":"","tags":"meetups"}]`))
+	}))
+	defer feed.Close()
+
+	fallback := NewCSVEventSource("fallback.csv", []byte(exportSample))
+	events, err := NewHTTPEventSource(feed.URL, fallback).Events()
+	if err != nil {
+		t.Fatalf("feed: %v", err)
+	}
+	if len(events) != 1 || events[0].Title != "Feed Hack Night" {
+		t.Fatalf("unexpected feed events: %#v", events)
+	}
+
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusInternalServerError)
+	}))
+	defer down.Close()
+
+	events, err = NewHTTPEventSource(down.URL, fallback).Events()
+	if err != nil {
+		t.Fatalf("fallback: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("a dead feed should fall back to the export, got %d", len(events))
 	}
 }

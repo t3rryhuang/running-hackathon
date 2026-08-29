@@ -75,6 +75,7 @@ make vet
 | `ANTHROPIC_API_KEY` | yes | SMS brain |
 | `ANTHROPIC_MODEL` | no | Defaults to `claude-sonnet-5` |
 | `TOOL_WEBHOOK_SECRET` | yes | Shared secret for `/tools/*` (`X-Webhook-Secret`) |
+| `EVENTS_FEED_URL` | no | Live event feed (CSV or JSON, same columns as the export). Falls back to the embedded `events_live.csv` when unreachable |
 | `TAVILY_API_KEY` | no | Reserved for live event search; warns if unset |
 | `GCAL_ICS_URL` | no | Fallback calendar when a user has no `ics_url`; warns if unset |
 | `DATABASE_PATH` | no | Default `./data.db` |

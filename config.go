@@ -20,6 +20,7 @@ type Config struct {
 	AnthropicModel    string
 	TavilyAPIKey      string
 	GCalICSURL        string
+	EventsFeedURL     string
 	ToolWebhookSecret string
 	DatabasePath      string
 	Port              string
@@ -41,6 +42,7 @@ func LoadConfig() Config {
 		TwilioAuthToken:   os.Getenv("TWILIO_AUTH_TOKEN"),
 		TwilioNumber:      os.Getenv("TWILIO_NUMBER"),
 		TwilioEdge:        os.Getenv("TWILIO_EDGE"),
+		EventsFeedURL:     os.Getenv("EVENTS_FEED_URL"),
 		TwilioRegion:      os.Getenv("TWILIO_REGION"),
 		ElevenLabsAPIKey:  os.Getenv("ELEVENLABS_API_KEY"),
 		ElevenLabsAPIBase: env("ELEVENLABS_API_BASE", "https://api.elevenlabs.io"),

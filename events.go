@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -95,4 +97,79 @@ func parseEventTime(s string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("unrecognised starts_at %q", s)
+}
+
+// httpEventSource pulls the same schema from a URL the operator controls, so a
+// live feed can replace the committed export without a rebuild. It accepts the
+// CSV export format or a JSON array of the same fields, and falls back to the
+// embedded CSV when the feed is unreachable.
+type httpEventSource struct {
+	url      string
+	fallback EventSource
+	client   *http.Client
+}
+
+func NewHTTPEventSource(url string, fallback EventSource) EventSource {
+	return &httpEventSource{url: url, fallback: fallback, client: &http.Client{Timeout: 20 * time.Second}}
+}
+
+func (h *httpEventSource) Name() string { return h.url }
+
+func (h *httpEventSource) Events() ([]Event, error) {
+	events, err := h.fetch()
+	if err == nil {
+		return events, nil
+	}
+	log.Printf("events: feed %s unavailable (%v), using %s", h.url, err, h.fallback.Name())
+	return h.fallback.Events()
+}
+
+func (h *httpEventSource) fetch() ([]Event, error) {
+	resp, err := h.client.Get(h.url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("feed returned %s", resp.Status)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return nil, err
+	}
+	if bytes.HasPrefix(bytes.TrimSpace(body), []byte("[")) {
+		return parseJSONEvents(body)
+	}
+	return NewCSVEventSource(h.url, body).Events()
+}
+
+func parseJSONEvents(body []byte) ([]Event, error) {
+	var rows []struct {
+		Title    string `json:"title"`
+		StartsAt string `json:"starts_at"`
+		City     string `json:"city"`
+		URL      string `json:"url"`
+		Tags     string `json:"tags"`
+	}
+	if err := json.Unmarshal(body, &rows); err != nil {
+		return nil, err
+	}
+	var out []Event
+	for _, r := range rows {
+		if strings.TrimSpace(r.URL) == "" {
+			continue
+		}
+		start, err := parseEventTime(r.StartsAt)
+		if err != nil {
+			continue
+		}
+		out = append(out, Event{
+			Title:    strings.TrimSpace(r.Title),
+			StartsAt: start.UTC(),
+			City:     strings.TrimSpace(r.City),
+			URL:      strings.TrimSpace(r.URL),
+			Tags:     strings.TrimSpace(r.Tags),
+		})
+	}
+	return out, nil
 }

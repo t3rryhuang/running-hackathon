@@ -7,9 +7,12 @@
 <div class="panel">
   <h2 class="panel-title">Check in now</h2>
   <div class="choices">
-    <button class="choice" data-checkin="call">
+    {{/* The label and the disabled state are driven by /api/call-state, so a
+         refresh or a second tab shows the same answer as the tab that pressed
+         it. */}}
+    <button class="choice" id="call-btn" data-checkin="call" aria-describedby="checkin-status">
       <span class="glyph" aria-hidden="true">&#9742;</span>
-      <span class="copy"><strong>Call me</strong><span class="desc">A short voice conversation</span></span>
+      <span class="copy"><strong data-call-label>Call me</strong><span class="desc">A short voice conversation</span></span>
     </button>
     <button class="choice" data-checkin="sms">
       <span class="glyph" aria-hidden="true">&#9993;</span>
@@ -177,23 +180,95 @@
   }
 
   var checkinStatus = document.getElementById('checkin-status');
+  var callBtn = document.getElementById('call-btn');
+  var callLabel = callBtn.querySelector('[data-call-label]');
+  // sending covers the gap between the click and the server's answer, when no
+  // state exists yet on either side; everything after that is the server's
+  // word, not a local timer.
+  var sending = false;
+  var pollTimer = null;
+
+  // paint reflects one server answer. Disabled is decided here and nowhere
+  // else, so the button can never be enabled while the server says a call is
+  // running.
+  function paint(state, message) {
+    var live = !!(state && state.in_progress);
+    var busy = live || sending;
+    callBtn.disabled = busy;
+    callBtn.setAttribute('aria-busy', busy ? 'true' : 'false');
+    callLabel.textContent = live ? 'Call in progress' : (sending ? 'Calling…' : 'Call me');
+    if (message !== undefined) checkinStatus.textContent = message;
+    else if (live) checkinStatus.textContent = 'A call is in progress. Pick up - this button unlocks when it ends.';
+    else if (!sending) checkinStatus.textContent = '';
+    if (live) schedulePoll(); else stopPoll();
+  }
+
+  function schedulePoll() {
+    if (pollTimer) return;
+    pollTimer = setInterval(refreshCallState, 4000);
+  }
+  function stopPoll() {
+    if (!pollTimer) return;
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  // refreshCallState is what makes a refresh, a background tab and a dropped
+  // connection converge: whatever the browser missed, it asks for.
+  function refreshCallState(message) {
+    return fetch('/api/call-state', { headers: { accept: 'application/json' } })
+      .then(function (r) {
+        if (r.status === 401) { window.location.href = '/login?expired=1'; return null; }
+        return r.json();
+      })
+      .then(function (body) { if (body) paint(body.call, message); })
+      .catch(function () { /* offline: leave the last known state alone */ });
+  }
+
   document.querySelectorAll('[data-checkin]').forEach(function (b) {
     b.addEventListener('click', function () {
       var channel = b.dataset.checkin;
+      if (channel === 'call' && (sending || callBtn.disabled)) return;
       var ask = channel === 'call' ? 'Call your phone now?' : 'Text you now?';
       if (!window.confirm(ask)) return;
-      b.disabled = true;
-      checkinStatus.textContent = channel === 'call' ? 'Calling…' : 'Texting…';
+      if (channel !== 'call') {
+        b.disabled = true;
+        checkinStatus.textContent = 'Texting…';
+        post('/api/checkin', { channel: channel }).then(function (res) {
+          b.disabled = false;
+          if (expired(res)) return;
+          checkinStatus.textContent = res.body.ok ? res.body.message : (res.body.error || 'That did not work.');
+        }).catch(function () {
+          b.disabled = false;
+          checkinStatus.textContent = 'Could not reach the server.';
+        });
+        return;
+      }
+      // Disabled before the request leaves, so a second click has nothing to
+      // hit even on a slow connection.
+      sending = true;
+      paint(null, 'Calling…');
       post('/api/checkin', { channel: channel }).then(function (res) {
-        b.disabled = false;
+        sending = false;
         if (expired(res)) return;
-        checkinStatus.textContent = res.body.ok ? res.body.message : (res.body.error || 'That did not work.');
+        if (res.status === 409) { paint(res.body.call, res.body.error); return; }
+        // A refused call frees the button; a placed one keeps it locked until
+        // the server says the call ended.
+        paint(res.body.call, res.body.ok ? res.body.message : (res.body.error || 'That did not work.'));
       }).catch(function () {
-        b.disabled = false;
-        checkinStatus.textContent = 'Could not reach the server.';
+        // The request may still have placed the call, so ask rather than
+        // assuming it failed and re-enabling.
+        sending = false;
+        refreshCallState('Lost the connection - checking whether the call started…');
       });
     });
   });
+
+  refreshCallState();
+  // A tab that was hidden or offline may have missed the end of a call.
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) refreshCallState();
+  });
+  window.addEventListener('online', function () { refreshCallState(); });
 
   var nameStatus = document.getElementById('name-status');
   document.getElementById('name-form').addEventListener('submit', function (e) {

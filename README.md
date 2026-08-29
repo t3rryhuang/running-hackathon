@@ -232,6 +232,11 @@ exported to the process silently means SQLite.
 - `transcripts.user_id` is nullable (migration 10): a call from a number that has not signed
   up is kept, unattached, alongside the number it came from, and attaches on verification.
   Erasing an account removes the unattached calls for its number too.
+- `users.call_started_at` (migration 11) is the server's record of a call being live. It is
+  claimed by a conditional `UPDATE` before the provider is called, so two clicks cannot place
+  two calls, and it is cleared on hang-up, on a call the provider refused, and when the
+  post-call transcript arrives. A call nobody ever reported the end of expires after ten
+  minutes so the dashboard button cannot lock permanently.
 - There is **no** automatic SQLite→Postgres data migration. The first Postgres boot starts
   empty.
 
@@ -262,8 +267,10 @@ implementation holds to:
 Transcripts arrive at `/webhooks/elevenlabs` (`post_call_transcription`). The handler
 verifies the HMAC and the timestamp freshness, answers `200` immediately, and stores
 asynchronously, keyed on the provider's `conversation_id` so a retried delivery updates one
-row. A delivery for a number that matches no user is dropped — a transcript never creates a
-profile and is never filed against a guess.
+row. A delivery for a number that matches no user is kept unattached rather than filed
+against a guess — a transcript never creates a profile — and attaches when that number
+verifies. A transcript is also the provider confirming the call is over, so it clears the
+live-call state behind the dashboard's call button.
 
 ## Endpoints
 
@@ -283,6 +290,7 @@ curl -s -X POST localhost:8090/signup   -b jar -d "channel=sms"   # refused unti
 
 # dashboard, for a profile that has already been through the interview
 curl -s -X POST localhost:8090/api/checkin -b jar -d "channel=call"    # check in now, on purpose
+curl -s localhost:8090/api/call-state -b jar                           # is a call live? (the button reads this)
 curl -s -X POST localhost:8090/api/name    -b jar -d "name=Rae"        # change your name
 curl -s -X POST localhost:8090/api/forget  -b jar -d "confirm=DELETE"  # erase your own account
 curl -s -X POST localhost:8090/call     -d '{"phone":"+447700900123"}'     # ring them now
@@ -412,6 +420,8 @@ journalctl -u runhack -f | grep -E 'slow:|outbound-call timing'
 | Dashboard is empty after a real call | Check `journalctl -u runhack \| grep -E 'transcript\|elevenlabs webhook'`. Rejected deliveries log the reason and the first bytes of the body; if the sync is also silent, `ELEVENLABS_API_KEY` is missing and only the webhook path is live |
 | `/login` never texts a code | Twilio is unconfigured on that box; the code is generated and has nowhere to go |
 | Agent asks for something already on file | Provider-side prompt, not the service. Re-apply [docs/VOICE-AGENT.md](docs/VOICE-AGENT.md); `/tools/get_context` shows what the agent was actually told |
+| Calls cut off at a consistent short duration (we saw ~47s) | Provider-side, not the service: an ElevenLabs workspace out of credits fails the conversation mid-call (`status=failed`). Check the workspace balance and the conversation status before looking at the code |
+| "Call me" stays disabled | The server still believes a call is live. `GET /api/call-state` says what it thinks; it clears on the post-call transcript, or after ten minutes if that never arrives |
 | Agent keeps the line open after the interview | `end_call` is not enabled on the agent. The Twilio hang-up backstop fires a few seconds later |
 | Calls feel slow to respond | Check `/metrics` and `slow:` log lines first. If the service is fast, it is the agent's STT/LLM/TTS configuration — see [LATENCY.md](LATENCY.md) |
 | Everything answers but nothing is remembered | Fresh Postgres starts empty; there is no SQLite→Postgres migration |

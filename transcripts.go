@@ -435,4 +435,13 @@ func (s *Server) storeConversation(conv elevenLabsConversation, source string) {
 	if err := s.store.SaveTranscript(t); err != nil {
 		log.Printf("elevenlabs %s: saving %s: %v", source, conv.ConversationID, err)
 	}
+	// A transcript is the provider confirming the call is over, however it
+	// ended - answered, dropped, failed. That is the definitive signal that
+	// frees the dashboard's call button, so it beats waiting for the stale-call
+	// timeout. Replays are harmless: clearing an already-clear slot is a no-op.
+	if ownerID != 0 {
+		if err := s.store.EndCall(ownerID); err != nil {
+			log.Printf("elevenlabs %s: clearing call state for %d: %v", source, ownerID, err)
+		}
+	}
 }

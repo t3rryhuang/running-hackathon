@@ -21,7 +21,23 @@ type User struct {
 	LastTriggeredAt  *time.Time
 	PhoneVerifiedAt  *time.Time
 	PhoneVerifiedVia string
-	CreatedAt        time.Time
+	// CallStartedAt is set while a call this service placed is believed to be
+	// live, and cleared when it ends. It is the server's answer to "is a call
+	// happening right now?", which a browser cannot be trusted to know.
+	CallStartedAt *time.Time
+	CreatedAt     time.Time
+}
+
+// callMaxDuration bounds how long a call is assumed to still be running when
+// nothing ever says it ended - a dropped call, a crashed process, a transcript
+// that never arrives. Without it one lost hang-up would disable the check-in
+// button forever.
+const callMaxDuration = 10 * time.Minute
+
+// CallInProgress reports whether a call placed to this person is still believed
+// to be live.
+func (u *User) CallInProgress(now time.Time) bool {
+	return u.CallStartedAt != nil && now.Sub(*u.CallStartedAt) < callMaxDuration
 }
 
 // PhoneVerified reports whether something proved this person holds the number:
@@ -86,7 +102,7 @@ type Suggestion struct {
 	Event     Event
 }
 
-const userSelect = `SELECT id, phone, name, channel, frequency, COALESCE(ics_url,''), COALESCE(interests,''), onboarded_at, COALESCE(last_call_sid,''), last_triggered_at, phone_verified_at, COALESCE(phone_verified_via,''), created_at FROM users`
+const userSelect = `SELECT id, phone, name, channel, frequency, COALESCE(ics_url,''), COALESCE(interests,''), onboarded_at, COALESCE(last_call_sid,''), last_triggered_at, phone_verified_at, COALESCE(phone_verified_via,''), call_started_at, created_at FROM users`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -104,9 +120,13 @@ func (s *Store) UserByID(id int64) (*User, error) {
 
 func scanUser(row scanner) (*User, error) {
 	var u User
-	var onboarded, last, verified sql.NullTime
-	if err := row.Scan(&u.ID, &u.Phone, &u.Name, &u.Channel, &u.Frequency, &u.ICSURL, &u.Interests, &onboarded, &u.LastCallSID, &last, &verified, &u.PhoneVerifiedVia, &u.CreatedAt); err != nil {
+	var onboarded, last, verified, calling sql.NullTime
+	if err := row.Scan(&u.ID, &u.Phone, &u.Name, &u.Channel, &u.Frequency, &u.ICSURL, &u.Interests, &onboarded, &u.LastCallSID, &last, &verified, &u.PhoneVerifiedVia, &calling, &u.CreatedAt); err != nil {
 		return nil, err
+	}
+	if calling.Valid {
+		t := calling.Time
+		u.CallStartedAt = &t
 	}
 	if onboarded.Valid {
 		t := onboarded.Time
@@ -296,6 +316,26 @@ func (s *Store) MarkOnboarded(u *User) error {
 // the service can hang it up once onboarding is done.
 func (s *Store) SetCallSID(userID int64, sid string) error {
 	_, err := s.exec(`UPDATE users SET last_call_sid=? WHERE id=?`, nullStr(sid), userID)
+	return err
+}
+
+// StartCall records that a call is live, but only if one is not already
+// running: the UPDATE itself is the lock, so two clicks racing on two
+// connections cannot both place a call.
+func (s *Store) StartCall(userID int64, now time.Time) (bool, error) {
+	res, err := s.exec(`UPDATE users SET call_started_at=? WHERE id=? AND (call_started_at IS NULL OR call_started_at < ?)`,
+		now.UTC(), userID, now.Add(-callMaxDuration).UTC())
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// EndCall clears the live-call state, whether the call ended well, was hung up
+// or never connected. Safe to call when no call is running.
+func (s *Store) EndCall(userID int64) error {
+	_, err := s.exec(`UPDATE users SET call_started_at=NULL WHERE id=?`, userID)
 	return err
 }
 

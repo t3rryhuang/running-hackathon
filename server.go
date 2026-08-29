@@ -115,6 +115,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("/api/me", s.requireUser(s.handleMe))
 	mux.HandleFunc("/api/name", s.requireUser(s.handleSetName))
 	mux.HandleFunc("/api/checkin", timed("api.checkin", s.requireUser(s.handleCheckinNow)))
+	mux.HandleFunc("/api/call-state", timed("api.call_state", s.requireUser(s.handleCallState)))
 	mux.HandleFunc("/api/forget", s.handleForgetMe)
 	mux.HandleFunc("/api/transcripts", timed("api.transcripts", s.requireUser(s.handleTranscriptList)))
 	mux.HandleFunc("/api/transcripts/", s.requireUser(s.handleTranscriptItem))
@@ -274,6 +275,10 @@ func (s *Server) handleCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.placeCall(u); err != nil {
+		if errors.Is(err, errCallInProgress) {
+			writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": "a call is already in progress"})
+			return
+		}
 		log.Printf("call: %v", err)
 		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": "could not place the call"})
 		return
@@ -492,9 +497,25 @@ func (s *Server) callerContext(u *User) CallerContext {
 	return buildCallerContext(u.Phone, u, items)
 }
 
+// errCallInProgress is returned rather than ringing somebody twice. A second
+// call would talk over the first and, because both would resume the same
+// session, save each other's answers.
+var errCallInProgress = errors.New("a call to this number is already in progress")
+
 // placeCall rings the user and remembers the Twilio call SID ElevenLabs reports
 // back, which is what lets the service hang up when onboarding finishes.
+//
+// The live-call slot is claimed in the database before the provider is called,
+// so two requests racing - two clicks, two tabs, a click landing on top of a
+// scheduled check-in - cannot both get through.
 func (s *Server) placeCall(u *User) error {
+	started, err := s.store.StartCall(u.ID, time.Now())
+	if err != nil {
+		return err
+	}
+	if !started {
+		return errCallInProgress
+	}
 	// The agent asks for context within a second of the caller picking up, so
 	// fetch the calendar while the phone is still ringing.
 	go s.brain.WarmCalendar(u)
@@ -504,6 +525,11 @@ func (s *Server) placeCall(u *User) error {
 		Vars: s.callerContext(u).DynamicVariables(),
 	})
 	if err != nil {
+		// The call never happened, so release the slot immediately rather than
+		// leaving the button dead until the stale-call timeout.
+		if clearErr := s.store.EndCall(u.ID); clearErr != nil {
+			log.Printf("call: release slot for %d: %v", u.ID, clearErr)
+		}
 		return err
 	}
 	u.LastCallSID = res.CallSID
@@ -526,7 +552,19 @@ func (s *Server) endCall(u *User) {
 			log.Printf("hangup %s: %v", sid, err)
 		}
 		_ = s.store.SetCallSID(u.ID, "")
+		_ = s.store.EndCall(u.ID)
 	})
+}
+
+// endOfOnboardingInstruction tells the agent what to do once every onboarding
+// answer is on file. On the introduction call that means goodbye; on a check-in
+// where the agent merely re-confirmed a known profile it means carry on, since
+// hanging up there would end the check-in the person actually rang for.
+func endOfOnboardingInstruction(wasOnboarded bool) string {
+	if wasOnboarded {
+		return "This profile was already complete, so nothing new was learned. Do not end the call and do not repeat these questions - continue the check-in."
+	}
+	return "Onboarding is complete. Say a short goodbye and call the end_call tool now - do not ask another question."
 }
 
 // openingMessage personalises the opening text with today's calendar.
@@ -673,6 +711,7 @@ func (s *Server) toolSaveOnboarding(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	wasOnboarded := u.Onboarded()
 	missing, err := s.store.SaveOnboarding(u, req.Name, req.Interests, req.Frequency)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
@@ -701,15 +740,21 @@ func (s *Server) toolSaveOnboarding(w http.ResponseWriter, r *http.Request) {
 	// The interview is the whole point of the onboarding call, so finishing it
 	// ends the call: the agent is told to invoke end_call, and endCall hangs the
 	// line up over Twilio if it doesn't.
-	s.endCall(u)
+	//
+	// Only an onboarding call, though. An agent that re-saves a known profile
+	// during a routine check-in is confirming what it already has, not finishing
+	// an interview, and hanging up on that cuts the check-in off mid-sentence.
+	if !wasOnboarded {
+		s.endCall(u)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":                   true,
 		"name":                 u.Name,
 		"interests":            u.Interests,
 		"frequency":            u.Frequency,
 		"onboarding_complete":  true,
-		"end_call":             true,
-		"instruction_to_agent": "Onboarding is complete. Say a short goodbye and call the end_call tool now - do not ask another question.",
+		"end_call":             !wasOnboarded,
+		"instruction_to_agent": endOfOnboardingInstruction(wasOnboarded),
 	})
 }
 

@@ -49,6 +49,34 @@ func TestToolWebhooksStayWithinTheirLatencyBudget(t *testing.T) {
 	}
 }
 
+// The dashboard polls call state every few seconds while a call runs, so it has
+// to stay a single cheap read: anything that grows here is multiplied by every
+// open tab.
+func TestCallStatePollIsCheap(t *testing.T) {
+	srv, store, tel, _ := newTestServer(t, nil)
+	cookie := onboardedUser(t, srv, store, tel, "+447700900203", "Ada")
+	u, _ := store.UserByPhone("+447700900203")
+	if _, err := store.StartCall(u.ID, time.Now()); err != nil {
+		t.Fatalf("start call: %v", err)
+	}
+
+	var worst time.Duration
+	for i := 0; i < 25; i++ {
+		start := time.Now()
+		rec := get(t, srv, "/api/call-state", cookie)
+		if d := time.Since(start); d > worst {
+			worst = d
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("call state: %d", rec.Code)
+		}
+	}
+	if worst > toolBudget {
+		t.Errorf("call-state poll worst case %s exceeds the %s budget", worst.Round(time.Millisecond), toolBudget)
+	}
+	t.Logf("call-state poll worst case %s", worst.Round(time.Microsecond))
+}
+
 // TestTranscriptWebhookAnswersBeforeItStores is the reason the handler defers
 // its work: the provider retries slow deliveries, so the response must not wait
 // on the database.

@@ -142,6 +142,24 @@ func TestPostgresBackend(t *testing.T) {
 		t.Fatalf("adopted call missing from the dashboard list: %d (%v)", total, err)
 	}
 
+	// The live-call slot is a conditional UPDATE, so it has to be proven on the
+	// real dialect: it is what stops two clicks placing two calls.
+	if started, err := store.StartCall(u.ID, time.Now()); err != nil || !started {
+		t.Fatalf("claiming the call slot on postgres: %v %v", started, err)
+	}
+	if again, err := store.StartCall(u.ID, time.Now()); err != nil || again {
+		t.Fatalf("postgres let a second call start while one was running: %v %v", again, err)
+	}
+	if fresh, err := store.UserByID(u.ID); err != nil || !fresh.CallInProgress(time.Now()) {
+		t.Fatalf("call state did not round-trip through postgres: %v", err)
+	}
+	if err := store.EndCall(u.ID); err != nil {
+		t.Fatalf("end call on postgres: %v", err)
+	}
+	if fresh, err := store.UserByID(u.ID); err != nil || fresh.CallInProgress(time.Now()) {
+		t.Fatalf("call state was not cleared on postgres: %v", err)
+	}
+
 	code, err := store.IssueLoginCode(phone, time.Now())
 	if err != nil {
 		t.Fatalf("issue code: %v", err)

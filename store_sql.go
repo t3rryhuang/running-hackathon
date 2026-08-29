@@ -289,6 +289,13 @@ FROM transcripts t LEFT JOIN users u ON u.id = t.user_id`,
 		`CREATE INDEX IF NOT EXISTS transcripts_user ON transcripts (user_id, started_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS transcripts_phone ON transcripts (phone, started_at DESC)`,
 	}},
+
+	// Whether a call is in progress has to be a fact the server holds, not a
+	// spinner the browser is running: a refresh, a second tab or a double
+	// click must all see the same answer.
+	{Version: 11, Name: "call_state", SQL: []string{
+		`ALTER TABLE users ADD COLUMN call_started_at {{ts}}`,
+	}},
 }
 
 // Store is the persistence layer. Every user-scoped query takes a user id and

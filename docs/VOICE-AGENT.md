@@ -61,6 +61,8 @@ If phone_verified is "no" ({{phone_verified}}), do not use their name until
 they confirm who they are, and say why you are checking.
 
 When the interview is finished, call save_onboarding and then end_call.
+Only end the call if save_onboarding replies with end_call: true. On a check-in
+for somebody already known it replies false, and the call must continue.
 ```
 
 ## Behaviour the service guarantees
@@ -74,6 +76,7 @@ When the interview is finished, call save_onboarding and then end_call.
 | Resumed caller | earlier answers and refusals carried into the new session |
 | Stale answer | time-bound answers (e.g. "free at 7 tonight?", 20h TTL) go back into `ask_only`; stable profile facts do not |
 | Two callers | context is keyed on user id and normalised phone throughout; nothing crosses between profiles |
+| `save_onboarding` on a profile that is already complete | `end_call: false`, and the agent is told to continue the check-in — finishing an interview ends a call, re-confirming known facts does not |
 
 Skips are deliberately *not* carried between sessions — "not now" is about that
 conversation. Declines are carried: a refusal is a standing preference.

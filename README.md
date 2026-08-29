@@ -66,7 +66,10 @@ make vet
 | `TWILIO_ACCOUNT_SID` | yes | Twilio REST auth |
 | `TWILIO_AUTH_TOKEN` | yes | Twilio REST auth |
 | `TWILIO_NUMBER` | yes | Sending number (E.164) |
+| `TWILIO_REGION` | no | Twilio processing region, e.g. `ie1` (Ireland). Default global (`us1`). Needs region-scoped credentials |
+| `TWILIO_EDGE` | no | Edge for the chosen region, e.g. `dublin`. Inferred from `TWILIO_REGION` when omitted |
 | `ELEVENLABS_API_KEY` | yes | Outbound voice calls (`xi-api-key`) |
+| `ELEVENLABS_API_BASE` | no | Defaults to `https://api.elevenlabs.io` |
 | `ELEVENLABS_AGENT_ID` | yes | Conversational agent that runs the call |
 | `ELEVENLABS_PHONE_ID` | yes | The agent's Twilio number id in ElevenLabs |
 | `ANTHROPIC_API_KEY` | yes | SMS brain |

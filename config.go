@@ -10,7 +10,10 @@ type Config struct {
 	TwilioAccountSID  string
 	TwilioAuthToken   string
 	TwilioNumber      string
+	TwilioEdge        string
+	TwilioRegion      string
 	ElevenLabsAPIKey  string
+	ElevenLabsAPIBase string
 	ElevenLabsAgentID string
 	ElevenLabsPhoneID string
 	AnthropicAPIKey   string
@@ -37,7 +40,10 @@ func LoadConfig() Config {
 		TwilioAccountSID:  os.Getenv("TWILIO_ACCOUNT_SID"),
 		TwilioAuthToken:   os.Getenv("TWILIO_AUTH_TOKEN"),
 		TwilioNumber:      os.Getenv("TWILIO_NUMBER"),
+		TwilioEdge:        os.Getenv("TWILIO_EDGE"),
+		TwilioRegion:      os.Getenv("TWILIO_REGION"),
 		ElevenLabsAPIKey:  os.Getenv("ELEVENLABS_API_KEY"),
+		ElevenLabsAPIBase: env("ELEVENLABS_API_BASE", "https://api.elevenlabs.io"),
 		ElevenLabsAgentID: os.Getenv("ELEVENLABS_AGENT_ID"),
 		ElevenLabsPhoneID: os.Getenv("ELEVENLABS_PHONE_ID"),
 		AnthropicAPIKey:   os.Getenv("ANTHROPIC_API_KEY"),

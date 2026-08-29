@@ -37,7 +37,9 @@ func (f *fakeAnthropic) CreateMessage(_ context.Context, req AnthropicRequest) (
 
 // recordedSMS is a Telephony stub that captures outbound texts.
 type recordedSMS struct {
-	sms []string
+	sms       []string
+	hangups   []string
+	hangupErr error
 }
 
 func (r *recordedSMS) SendSMS(to, body string) error {
@@ -45,18 +47,32 @@ func (r *recordedSMS) SendSMS(to, body string) error {
 	return nil
 }
 
+func (r *recordedSMS) HangUp(callSID string) error {
+	r.hangups = append(r.hangups, callSID)
+	return r.hangupErr
+}
+
 // recordedVoice is a Voice stub that captures outbound agent calls.
 type recordedVoice struct {
-	calls []string
+	calls []CallRequest
+	sid   string
 	err   error
 }
 
-func (r *recordedVoice) Call(to string) error {
+func (r *recordedVoice) Call(cr CallRequest) (CallResult, error) {
 	if r.err != nil {
-		return r.err
+		return CallResult{}, r.err
 	}
-	r.calls = append(r.calls, to)
-	return nil
+	r.calls = append(r.calls, cr)
+	return CallResult{CallSID: r.sid, ConversationID: "conv_test"}, nil
+}
+
+func (r *recordedVoice) numbers() []string {
+	var out []string
+	for _, c := range r.calls {
+		out = append(out, c.To)
+	}
+	return out
 }
 
 func newTestServer(t *testing.T, client AnthropicClient) (*Server, *Store, *recordedSMS, *recordedVoice) {
@@ -71,9 +87,14 @@ func newTestServer(t *testing.T, client AnthropicClient) (*Server, *Store, *reco
 	}
 	cfg := Config{ToolWebhookSecret: "s3cret", AnthropicModel: "claude-sonnet-5"}
 	tel := &recordedSMS{}
-	voice := &recordedVoice{}
+	voice := &recordedVoice{sid: "CAtest123"}
 	brain := NewBrain(store, NewCalendar(), client, cfg.AnthropicModel, "")
-	return NewServer(cfg, store, brain, tel, voice, NewCalendar()), store, tel, voice
+	srv := NewServer(cfg, store, brain, tel, voice, NewCalendar())
+	srv.afterFunc = func(_ time.Duration, f func()) *time.Timer {
+		f()
+		return time.NewTimer(time.Hour)
+	}
+	return srv, store, tel, voice
 }
 
 func postSMS(t *testing.T, srv *Server, from, body string) *httptest.ResponseRecorder {
@@ -298,15 +319,19 @@ func TestSuggestEventPrefersStatedInterests(t *testing.T) {
 func TestCallEndpointRingsThroughVoice(t *testing.T) {
 	srv, _, _, voice := newTestServer(t, nil)
 
-	req := httptest.NewRequest(http.MethodPost, "/call", strings.NewReader(`{"phone":"+447700900142"}`))
+	req := httptest.NewRequest(http.MethodPost, "/call", strings.NewReader(`{"phone":"+447700900142","name":"Keanu"}`))
 	req.Header.Set("content-type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.Routes().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
 	}
-	if len(voice.calls) != 1 || voice.calls[0] != "+447700900142" {
+	if len(voice.calls) != 1 || voice.calls[0].To != "+447700900142" {
 		t.Fatalf("call not placed: %#v", voice.calls)
+	}
+	// The wizard collects the name first so the agent can open with it.
+	if voice.calls[0].Name != "Keanu" {
+		t.Fatalf("call should carry the name: %#v", voice.calls[0])
 	}
 
 	rec = httptest.NewRecorder()
@@ -325,11 +350,11 @@ func TestElevenLabsOutboundRequestShape(t *testing.T) {
 	if !ok {
 		t.Fatalf("want a live ElevenLabs caller, got %T", v)
 	}
-	req, err := el.newRequest("+447700900143")
+	req, err := el.newRequest(CallRequest{To: "+447700900143", Name: "Keanu"})
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
-	if req.URL.String() != elevenLabsOutboundURL {
+	if req.URL.String() != "https://api.elevenlabs.io"+elevenLabsOutboundPath {
 		t.Errorf("url: %s", req.URL)
 	}
 	if got := req.Header.Get("xi-api-key"); got != "key-123" {
@@ -340,9 +365,11 @@ func TestElevenLabsOutboundRequestShape(t *testing.T) {
 	if err := json.Unmarshal(body, &sent); err != nil {
 		t.Fatalf("bad body %s: %v", body, err)
 	}
-	want := outboundCallRequest{AgentID: "agent_abc", AgentPhoneNumberID: "phnum_xyz", ToNumber: "+447700900143"}
-	if sent != want {
-		t.Fatalf("body = %#v, want %#v", sent, want)
+	if sent.AgentID != "agent_abc" || sent.AgentPhoneNumberID != "phnum_xyz" || sent.ToNumber != "+447700900143" {
+		t.Fatalf("body = %#v", sent)
+	}
+	if sent.ClientData == nil || sent.ClientData.DynamicVariables["user_name"] != "Keanu" {
+		t.Fatalf("agent should get the name as a dynamic variable: %s", body)
 	}
 
 	if _, ok := NewVoice(Config{ElevenLabsAPIKey: "key-123"}).(logVoice); !ok {
@@ -449,8 +476,8 @@ func TestTriggerSendsOpeningMessageOrCall(t *testing.T) {
 	if len(tel.sms) != 1 || !strings.Contains(tel.sms[0], "Hey Sam") {
 		t.Fatalf("sms trigger: %#v", tel.sms)
 	}
-	if len(voice.calls) != 1 || voice.calls[0] != "+447700900132" {
-		t.Fatalf("call trigger should go through ElevenLabs: %#v", voice.calls)
+	if got := voice.numbers(); len(got) != 1 || got[0] != "+447700900132" {
+		t.Fatalf("call trigger should go through ElevenLabs: %#v", got)
 	}
 	u, _ := store.UserByPhone("+447700900131")
 	if u.LastTriggeredAt == nil {
@@ -496,5 +523,79 @@ func TestDueNow(t *testing.T) {
 	twice := &User{Frequency: "twice-daily"}
 	if !DueNow(twice, at(15, 20)) {
 		t.Error("twice-daily user should be due at 20:xx")
+	}
+}
+
+func TestOnboardingCompletionHangsUpTheCall(t *testing.T) {
+	srv, store, tel, _ := newTestServer(t, nil)
+
+	rec := httptest.NewRecorder()
+	call := httptest.NewRequest(http.MethodPost, "/call", strings.NewReader(`{"phone":"+447700900150","name":"Keanu"}`))
+	call.Header.Set("content-type", "application/json")
+	srv.Routes().ServeHTTP(rec, call)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("call: %d %s", rec.Code, rec.Body.String())
+	}
+	u, err := store.UserByPhone("+447700900150")
+	if err != nil || u.LastCallSID != "CAtest123" {
+		t.Fatalf("call sid not remembered: %#v (%v)", u, err)
+	}
+
+	rec = httptest.NewRecorder()
+	done := httptest.NewRequest(http.MethodPost, "/tools/save_onboarding",
+		strings.NewReader(`{"phone":"+447700900150","name":"Keanu","interests":"hackathons","frequency":"daily"}`))
+	done.Header.Set("X-Webhook-Secret", "s3cret")
+	srv.Routes().ServeHTTP(rec, done)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save_onboarding: %d %s", rec.Code, rec.Body.String())
+	}
+
+	var out struct {
+		EndCall bool `json:"end_call"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("bad json: %v", err)
+	}
+	if !out.EndCall {
+		t.Errorf("agent should be told to end the call: %s", rec.Body.String())
+	}
+	if len(tel.hangups) != 1 || tel.hangups[0] != "CAtest123" {
+		t.Fatalf("call should be hung up as a backstop: %#v", tel.hangups)
+	}
+	if u, _ := store.UserByPhone("+447700900150"); u.LastCallSID != "" {
+		t.Errorf("sid should be cleared after hangup, got %q", u.LastCallSID)
+	}
+}
+
+func TestTwilioAPIBaseRegionSelection(t *testing.T) {
+	cases := []struct{ edge, region, want string }{
+		{"", "", "https://api.twilio.com"},
+		{"", "us1", "https://api.twilio.com"},
+		{"", "ie1", "https://api.dublin.ie1.twilio.com"},
+		{"dublin", "ie1", "https://api.dublin.ie1.twilio.com"},
+		{"", "xx9", "https://api.twilio.com"},
+	}
+	for _, c := range cases {
+		if got := twilioAPIBase(c.edge, c.region); got != c.want {
+			t.Errorf("twilioAPIBase(%q,%q) = %s, want %s", c.edge, c.region, got, c.want)
+		}
+	}
+}
+
+func TestWizardAsksForNameFirst(t *testing.T) {
+	srv, _, _, _ := newTestServer(t, nil)
+	rec := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	body := rec.Body.String()
+	name := strings.Index(body, "What should I call you?")
+	phone := strings.Index(body, "What's your number?")
+	if name < 0 || phone < 0 {
+		t.Fatalf("wizard missing a step: name=%d phone=%d", name, phone)
+	}
+	if name > phone {
+		t.Errorf("name step should come before the phone step")
 	}
 }

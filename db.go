@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS users (
 	ics_url TEXT,
 	interests TEXT NOT NULL DEFAULT '',
 	onboarded_at DATETIME,
+	last_call_sid TEXT,
 	last_triggered_at DATETIME,
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -62,6 +63,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS events_unique ON events (title, starts_at);
 var migrations = []string{
 	`ALTER TABLE users ADD COLUMN interests TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE users ADD COLUMN onboarded_at DATETIME`,
+	`ALTER TABLE users ADD COLUMN last_call_sid TEXT`,
 }
 
 type User struct {
@@ -73,6 +75,7 @@ type User struct {
 	ICSURL          string
 	Interests       string
 	OnboardedAt     *time.Time
+	LastCallSID     string
 	LastTriggeredAt *time.Time
 	CreatedAt       time.Time
 }
@@ -153,7 +156,7 @@ func OpenStore(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-const userSelect = `SELECT id, phone, name, channel, frequency, COALESCE(ics_url,''), COALESCE(interests,''), onboarded_at, last_triggered_at, created_at FROM users`
+const userSelect = `SELECT id, phone, name, channel, frequency, COALESCE(ics_url,''), COALESCE(interests,''), onboarded_at, COALESCE(last_call_sid,''), last_triggered_at, created_at FROM users`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -164,7 +167,7 @@ func (s *Store) UserByPhone(phone string) (*User, error) {
 func scanUser(row scanner) (*User, error) {
 	var u User
 	var onboarded, last sql.NullTime
-	if err := row.Scan(&u.ID, &u.Phone, &u.Name, &u.Channel, &u.Frequency, &u.ICSURL, &u.Interests, &onboarded, &last, &u.CreatedAt); err != nil {
+	if err := row.Scan(&u.ID, &u.Phone, &u.Name, &u.Channel, &u.Frequency, &u.ICSURL, &u.Interests, &onboarded, &u.LastCallSID, &last, &u.CreatedAt); err != nil {
 		return nil, err
 	}
 	if onboarded.Valid {
@@ -254,6 +257,13 @@ func (s *Store) SaveOnboarding(u *User, name, interests, frequency string) error
 	u.OnboardedAt = &now
 	_, err := s.db.Exec(`UPDATE users SET name=?, interests=?, frequency=?, onboarded_at=? WHERE id=?`,
 		u.Name, u.Interests, u.Frequency, now, u.ID)
+	return err
+}
+
+// SetCallSID remembers the Twilio call behind the current voice conversation so
+// the service can hang it up once onboarding is done.
+func (s *Store) SetCallSID(userID int64, sid string) error {
+	_, err := s.db.Exec(`UPDATE users SET last_call_sid=? WHERE id=?`, nullStr(sid), userID)
 	return err
 }
 

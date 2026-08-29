@@ -7,21 +7,50 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
-const elevenLabsOutboundURL = "https://api.elevenlabs.io/v1/convai/twilio/outbound-call"
+const elevenLabsOutboundPath = "/v1/convai/twilio/outbound-call"
+
+// CallRequest is what the agent needs to open the conversation. Name and
+// onboarding state travel as dynamic variables so the agent can greet people by
+// name instead of spending the first turn asking who it is talking to.
+type CallRequest struct {
+	To        string
+	Name      string
+	Onboarded bool
+}
+
+// CallResult carries the identifiers ElevenLabs hands back, so the call can be
+// hung up later (see Server.finishCall).
+type CallResult struct {
+	ConversationID string
+	CallSID        string
+}
 
 // Voice places outbound agent calls. The interface keeps ElevenLabs out of the
 // request path in tests and lets the service boot without a key.
 type Voice interface {
-	Call(to string) error
+	Call(req CallRequest) (CallResult, error)
 }
 
 type outboundCallRequest struct {
-	AgentID            string `json:"agent_id"`
-	AgentPhoneNumberID string `json:"agent_phone_number_id"`
-	ToNumber           string `json:"to_number"`
+	AgentID            string             `json:"agent_id"`
+	AgentPhoneNumberID string             `json:"agent_phone_number_id"`
+	ToNumber           string             `json:"to_number"`
+	ClientData         *clientInitialData `json:"conversation_initiation_client_data,omitempty"`
+}
+
+type clientInitialData struct {
+	DynamicVariables map[string]string `json:"dynamic_variables"`
+}
+
+type outboundCallResponse struct {
+	Success        bool   `json:"success"`
+	Message        string `json:"message"`
+	ConversationID string `json:"conversation_id"`
+	CallSID        string `json:"callSid"`
 }
 
 type elevenLabsVoice struct {
@@ -39,23 +68,33 @@ func NewVoice(cfg Config) Voice {
 		log.Printf("elevenlabs: not configured (need ELEVENLABS_API_KEY, ELEVENLABS_AGENT_ID, ELEVENLABS_PHONE_ID), outbound calls will be logged only")
 		return logVoice{}
 	}
+	base := strings.TrimSuffix(cfg.ElevenLabsAPIBase, "/")
+	if base == "" {
+		base = "https://api.elevenlabs.io"
+	}
 	return &elevenLabsVoice{
 		apiKey:  cfg.ElevenLabsAPIKey,
 		agentID: cfg.ElevenLabsAgentID,
 		phoneID: cfg.ElevenLabsPhoneID,
 		client:  &http.Client{Timeout: 20 * time.Second},
-		baseURL: elevenLabsOutboundURL,
+		baseURL: base + elevenLabsOutboundPath,
 	}
 }
 
 // newRequest builds the outbound-call HTTP request. Split out from Call so the
 // body and headers can be asserted without a live key.
-func (v *elevenLabsVoice) newRequest(to string) (*http.Request, error) {
-	body, err := json.Marshal(outboundCallRequest{
+func (v *elevenLabsVoice) newRequest(cr CallRequest) (*http.Request, error) {
+	payload := outboundCallRequest{
 		AgentID:            v.agentID,
 		AgentPhoneNumberID: v.phoneID,
-		ToNumber:           to,
-	})
+		ToNumber:           cr.To,
+		ClientData: &clientInitialData{DynamicVariables: map[string]string{
+			"user_name":  cr.Name,
+			"user_phone": cr.To,
+			"onboarded":  boolWord(cr.Onboarded),
+		}},
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
@@ -68,28 +107,37 @@ func (v *elevenLabsVoice) newRequest(to string) (*http.Request, error) {
 	return req, nil
 }
 
-func (v *elevenLabsVoice) Call(to string) error {
-	req, err := v.newRequest(to)
+func boolWord(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
+}
+
+func (v *elevenLabsVoice) Call(cr CallRequest) (CallResult, error) {
+	req, err := v.newRequest(cr)
 	if err != nil {
-		return err
+		return CallResult{}, err
 	}
 	resp, err := v.client.Do(req)
 	if err != nil {
-		return err
+		return CallResult{}, err
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("elevenlabs outbound-call: status %d: %s", resp.StatusCode, string(raw))
+		return CallResult{}, fmt.Errorf("elevenlabs outbound-call: status %d: %s", resp.StatusCode, string(raw))
 	}
-	log.Printf("elevenlabs: outbound call queued to %s", to)
-	return nil
+	var out outboundCallResponse
+	_ = json.Unmarshal(raw, &out)
+	log.Printf("elevenlabs: outbound call queued to %s (call %s)", cr.To, out.CallSID)
+	return CallResult{ConversationID: out.ConversationID, CallSID: out.CallSID}, nil
 }
 
 // logVoice stands in for ElevenLabs when the integration is unconfigured.
 type logVoice struct{}
 
-func (logVoice) Call(to string) error {
-	log.Printf("[elevenlabs-stub] outbound agent call to %s", to)
-	return nil
+func (logVoice) Call(cr CallRequest) (CallResult, error) {
+	log.Printf("[elevenlabs-stub] outbound agent call to %s (name %q, onboarded %v)", cr.To, cr.Name, cr.Onboarded)
+	return CallResult{}, nil
 }

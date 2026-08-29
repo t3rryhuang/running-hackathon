@@ -1,25 +1,32 @@
 {{define "index.html"}}{{template "head" .}}
 <div class="dots" id="dots">
-  <span class="dot on"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+  <span class="dot on"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span>
 </div>
 
 <div class="err" id="err" hidden></div>
 
 <section class="step on" data-step="0">
-  <h1>What's your number?</h1>
+  <h1>What should I call you?</h1>
+  <p class="sub">First name is plenty.</p>
+  <input type="text" id="name" class="big" placeholder="Keanu" autocomplete="given-name" autofocus>
+  <button id="name-next">Continue</button>
+</section>
+
+<section class="step" data-step="1">
+  <h1 id="phone-title">What's your number?</h1>
   <p class="sub">I'll check in on you here. Country code included.</p>
   <input type="tel" id="phone" class="big" placeholder="+447700900123" inputmode="tel" autocomplete="tel">
   <button id="phone-next">Continue</button>
 </section>
 
-<section class="step" data-step="1">
+<section class="step" data-step="2">
   <h1>Call or text?</h1>
   <p class="sub">However you'd rather be nudged.</p>
   <button class="choice" data-channel="call"><strong>Call me</strong><span>A short voice check-in</span></button>
   <button class="choice" data-channel="sms"><strong>Text me</strong><span>A conversation over SMS</span></button>
 </section>
 
-<section class="step" data-step="2">
+<section class="step" data-step="3">
   <h1>How often should I check in?</h1>
   <p class="sub">You can change this later.</p>
   <button class="choice" data-frequency="daily"><strong>Daily</strong><span>Every morning at 9</span></button>
@@ -27,14 +34,14 @@
   <button class="choice" data-frequency="weekdays"><strong>Weekdays only</strong><span>Monday to Friday</span></button>
 </section>
 
-<section class="step" data-step="3">
+<section class="step" data-step="4">
   <h1 id="ring-title">I'll ring you now to get to know you</h1>
   <p class="sub" id="ring-sub">A quick chat about what you're into, then I'll leave you alone.</p>
   <button id="call-now">Call me now</button>
   <button class="ghost" id="call-skip">Skip for now</button>
 </section>
 
-<section class="step" data-step="4">
+<section class="step" data-step="5">
   <h1>You're in.</h1>
   <p class="sub" id="done-sub">Talk soon.</p>
   <a class="btn-link" id="journal-link" href="/journal">Open your journal</a>
@@ -44,7 +51,7 @@
 
 <script>
 (function () {
-  var state = { phone: "", channel: "sms", frequency: "daily" };
+  var state = { name: "", phone: "", channel: "sms", frequency: "daily" };
   var steps = document.querySelectorAll(".step");
   var dots = document.querySelectorAll(".dot");
   var err = document.getElementById("err");
@@ -56,18 +63,31 @@
   }
   function fail(msg) { err.textContent = msg; err.hidden = false; }
 
+  document.getElementById("name-next").addEventListener("click", function () {
+    var v = document.getElementById("name").value.trim();
+    if (v.length < 1) { return fail("Give me something to call you."); }
+    state.name = v;
+    document.getElementById("phone-title").textContent = "Nice to meet you, " + v + ". What's your number?";
+    document.getElementById("ring-title").textContent = "I'll ring you now to get to know you, " + v;
+    show(1);
+    document.getElementById("phone").focus();
+  });
+  document.getElementById("name").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { document.getElementById("name-next").click(); }
+  });
+
   document.getElementById("phone-next").addEventListener("click", function () {
     var v = document.getElementById("phone").value.replace(/[\s\-().]/g, "");
     if (!/^\+[1-9]\d{7,14}$/.test(v)) { return fail("Needs to be E.164, like +447700900123."); }
     state.phone = v;
-    show(1);
+    show(2);
   });
   document.getElementById("phone").addEventListener("keydown", function (e) {
     if (e.key === "Enter") { document.getElementById("phone-next").click(); }
   });
 
   document.querySelectorAll("[data-channel]").forEach(function (b) {
-    b.addEventListener("click", function () { state.channel = b.dataset.channel; show(2); });
+    b.addEventListener("click", function () { state.channel = b.dataset.channel; show(3); });
   });
 
   document.querySelectorAll("[data-frequency]").forEach(function (b) {
@@ -87,11 +107,11 @@
       if (!j.ok) { return fail(j.error || "Something went wrong."); }
       document.getElementById("journal-link").href = j.journal;
       if (state.channel === "call") {
-        show(3);
+        show(4);
       } else {
         document.getElementById("done-sub").textContent =
           "Check your phone - I've texted " + state.phone + ". Reply to it and your first check-in starts.";
-        show(4);
+        show(5);
       }
     }).catch(function () { fail("Could not reach the server."); });
   }
@@ -105,13 +125,13 @@
       btn.textContent = "Call me now";
       if (!j.ok) { return fail(j.error || "Could not place the call."); }
       document.getElementById("done-sub").textContent = "Pick up - I'm calling " + state.phone + " now.";
-      show(4);
+      show(5);
     });
   });
 
   document.getElementById("call-skip").addEventListener("click", function () {
     document.getElementById("done-sub").textContent = "I'll ring " + state.phone + " at your next check-in.";
-    show(4);
+    show(5);
   });
 
   document.getElementById("simulate").addEventListener("click", function () {
@@ -127,7 +147,7 @@
     return fetch(path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phone: state.phone })
+      body: JSON.stringify({ phone: state.phone, name: state.name })
     }).then(function (r) { return r.json(); }).catch(function () { return { ok: false, error: "Network error." }; });
   }
 })();

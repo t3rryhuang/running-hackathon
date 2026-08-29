@@ -36,10 +36,24 @@ type Server struct {
 	tel   Telephony
 	voice Voice
 	cal   *Calendar
+	// hangupGrace is how long the agent gets to say goodbye and hang up itself
+	// after onboarding completes, before the service ends the call over Twilio.
+	hangupGrace time.Duration
+	// afterFunc is time.AfterFunc in production; tests swap it for an
+	// immediate call so the backstop is observable without sleeping.
+	afterFunc func(time.Duration, func()) *time.Timer
 }
 
+// hangupGrace gives the agent a few seconds to deliver its farewell line before
+// the Twilio backstop cuts the call.
+const defaultHangupGrace = 8 * time.Second
+
 func NewServer(cfg Config, store *Store, brain *Brain, tel Telephony, voice Voice, cal *Calendar) *Server {
-	return &Server{cfg: cfg, store: store, brain: brain, tel: tel, voice: voice, cal: cal}
+	return &Server{
+		cfg: cfg, store: store, brain: brain, tel: tel, voice: voice, cal: cal,
+		hangupGrace: defaultHangupGrace,
+		afterFunc:   time.AfterFunc,
+	}
 }
 
 func (s *Server) Routes() *http.ServeMux {
@@ -123,6 +137,9 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 
 	if channel == "sms" {
 		body := "Hey, I'm CheckIn - your daily journalling companion. Reply to this message to start your first check-in."
+		if u.Name != "" {
+			body = "Hey " + u.Name + ", I'm CheckIn - your daily journalling companion. Reply to this message to start your first check-in."
+		}
 		if err := s.tel.SendSMS(phone, body); err != nil {
 			log.Printf("signup: welcome sms failed: %v", err)
 		} else {
@@ -136,6 +153,7 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":        true,
 			"phone":     phone,
+			"name":      u.Name,
 			"channel":   channel,
 			"frequency": frequency,
 			"journal":   "/journal?phone=" + url.QueryEscape(phone),
@@ -156,7 +174,8 @@ func (s *Server) handleCall(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "method not allowed"})
 		return
 	}
-	phone := normalisePhone(requestFields(r)["phone"])
+	fields := requestFields(r)
+	phone := normalisePhone(fields["phone"])
 	if !e164.MatchString(phone) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "phone must be E.164, e.g. +447700900123"})
 		return
@@ -166,13 +185,21 @@ func (s *Server) handleCall(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "user lookup failed"})
 		return
 	}
-	if err := s.voice.Call(u.Phone); err != nil {
+	// The wizard asks for a name before a number, so a call placed straight
+	// after signup can greet the user by name even for a brand new record.
+	if name := strings.TrimSpace(fields["name"]); name != "" && u.Name == "" {
+		u.Name = name
+		if err := s.store.UpsertUser(u); err != nil {
+			log.Printf("call: save name: %v", err)
+		}
+	}
+	if err := s.placeCall(u); err != nil {
 		log.Printf("call: %v", err)
 		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": "could not place the call"})
 		return
 	}
 	_ = s.store.MarkTriggered(u.ID, time.Now())
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "phone": u.Phone, "onboarded": u.Onboarded()})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "phone": u.Phone, "name": u.Name, "onboarded": u.Onboarded()})
 }
 
 // handleSettings changes the check-in frequency from the journal control panel.
@@ -320,13 +347,43 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 func (s *Server) TriggerCheckin(u *User) error {
 	defer func() { _ = s.store.MarkTriggered(u.ID, time.Now()) }()
 	if u.Channel == "call" {
-		return s.voice.Call(u.Phone)
+		return s.placeCall(u)
 	}
 	body := s.openingMessage(u)
 	if err := s.tel.SendSMS(u.Phone, body); err != nil {
 		return err
 	}
 	return s.store.AddMessage(u.ID, "assistant", body)
+}
+
+// placeCall rings the user and remembers the Twilio call SID ElevenLabs reports
+// back, which is what lets the service hang up when onboarding finishes.
+func (s *Server) placeCall(u *User) error {
+	res, err := s.voice.Call(CallRequest{To: u.Phone, Name: u.Name, Onboarded: u.Onboarded()})
+	if err != nil {
+		return err
+	}
+	u.LastCallSID = res.CallSID
+	if err := s.store.SetCallSID(u.ID, res.CallSID); err != nil {
+		log.Printf("call: remember sid: %v", err)
+	}
+	return nil
+}
+
+// endCall closes out a live call. The agent's own end_call tool is the primary
+// mechanism - the ask in the tool response below triggers it - and this Twilio
+// backstop covers agents that keep the line open after the interview is done.
+func (s *Server) endCall(u *User) {
+	sid := u.LastCallSID
+	if sid == "" {
+		return
+	}
+	s.afterFunc(s.hangupGrace, func() {
+		if err := s.tel.HangUp(sid); err != nil {
+			log.Printf("hangup %s: %v", sid, err)
+		}
+		_ = s.store.SetCallSID(u.ID, "")
+	})
 }
 
 // openingMessage personalises the opening text with today's calendar.
@@ -439,11 +496,18 @@ func (s *Server) toolSaveOnboarding(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
+	// The interview is the whole point of the onboarding call, so finishing it
+	// ends the call: the agent is told to invoke end_call, and endCall hangs the
+	// line up over Twilio if it doesn't.
+	s.endCall(u)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":        true,
-		"name":      u.Name,
-		"interests": u.Interests,
-		"frequency": u.Frequency,
+		"ok":                   true,
+		"name":                 u.Name,
+		"interests":            u.Interests,
+		"frequency":            u.Frequency,
+		"onboarding_complete":  true,
+		"end_call":             true,
+		"instruction_to_agent": "Onboarding is complete. Say a short goodbye and call the end_call tool now - do not ask another question.",
 	})
 }
 

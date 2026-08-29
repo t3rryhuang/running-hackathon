@@ -23,8 +23,12 @@ const (
 	loginCodeAttempts = 5
 	// loginCodeRate is how many codes one number can request inside
 	// loginCodeWindow before it has to wait.
-	loginCodeRate       = 3
-	loginCodeWindow     = 15 * time.Minute
+	loginCodeRate   = 3
+	loginCodeWindow = 15 * time.Minute
+	// loginCodeCooldown is the wait between two codes for the same number. It
+	// is short enough to survive a slow SMS and long enough that the resend
+	// button cannot be used to spray one number with texts.
+	loginCodeCooldown   = 30 * time.Second
 	authSessionTTL      = 30 * 24 * time.Hour
 	authSessionCookie   = "checkin_session"
 	authAuditRetention  = 180 * 24 * time.Hour
@@ -141,6 +145,15 @@ func (s *Store) IssueLoginCode(phone string, now time.Time) (string, error) {
 		return "", err
 	}
 	return code, nil
+}
+
+// DiscardLoginCode removes a code that was minted but never reached anybody,
+// which is what an SMS provider failure leaves behind. Deleting it rather than
+// consuming it also hands the number its rate-limit slot back, so a provider
+// outage does not lock somebody out of their own account for fifteen minutes.
+func (s *Store) DiscardLoginCode(phone string) error {
+	_, err := s.exec(`DELETE FROM login_codes WHERE phone=? AND consumed_at IS NULL`, phone)
+	return err
 }
 
 // ConsumeLoginCode checks a code and burns it. A correct code works exactly

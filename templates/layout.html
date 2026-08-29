@@ -77,6 +77,28 @@ body::before {
 }
 .brand .tag { margin-left: auto; font-size: var(--t-micro); color: var(--muted); }
 
+/* Auth state -------------------------------------------------------- */
+.authbar {
+  display: flex; align-items: center; gap: var(--s-2); flex-wrap: wrap;
+  margin: calc(var(--s-6) * -1 + var(--s-2)) 0 var(--s-5);
+  font-size: var(--t-small); color: var(--muted);
+}
+.authbar .dot {
+  width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: var(--line);
+}
+.authbar[data-state="in"] .dot { background: #5FD08A; }
+.authbar[data-state="out"] .dot { background: var(--muted); }
+.authbar[data-state="error"] .dot, .authbar[data-state="expired"] .dot { background: var(--apricot); }
+.authbar[data-state="error"] #auth-label, .authbar[data-state="expired"] #auth-label { color: var(--apricot); }
+.authbar .who { color: var(--cream); font-weight: 500; }
+.authbar a { margin-left: auto; font-size: var(--t-small); }
+.banner {
+  border: 1px solid var(--apricot); border-radius: var(--r-sm);
+  padding: var(--s-3) var(--s-4); margin: 0 0 var(--s-5);
+  color: var(--cream); font-size: var(--t-small); background: rgba(233, 124, 75, .10);
+}
+
 /* Type -------------------------------------------------------------- */
 h1 {
   font-family: var(--font-display); font-weight: 600;
@@ -251,12 +273,65 @@ input[type=search]:focus { outline: none; border-color: var(--apricot); box-shad
 }
 </style>
 </head>
-<body><div class="wrap">
+<body{{if .Protected}} data-protected{{end}}><div class="wrap">
 <a class="brand" href="/">
   <img src="/static/brand/checkin-mark-64.png" alt="" width="32" height="32">
   <span class="word">CheckIn</span>
   <span class="tag">daily check-ins</span>
 </a>
+<div class="authbar" id="authbar" data-state="loading" role="status" aria-live="polite">
+  <span class="dot" aria-hidden="true"></span>
+  <span id="auth-label">Checking your session…</span>
+  <a href="/login" id="auth-in" hidden>Sign in</a>
+  <a href="/auth/logout" id="auth-out" hidden>Sign out</a>
+</div>
 {{end}}
 
-{{define "foot"}}</div></body></html>{{end}}
+{{define "foot"}}
+<script>
+// Every page says plainly whether you are signed in, and never shows more than
+// a first name or the last four digits of your own number. Pages that hold
+// personal data carry data-protected, and are bounced to /login when the
+// session has gone rather than being left half-rendered.
+(function () {
+  var bar = document.getElementById('authbar');
+  if (!bar) { return; }
+  var label = document.getElementById('auth-label');
+  var signIn = document.getElementById('auth-in');
+  var signOut = document.getElementById('auth-out');
+  var protectedPage = document.body.hasAttribute('data-protected');
+
+  function state(name, text, showIn, showOut) {
+    bar.setAttribute('data-state', name);
+    label.textContent = text;
+    signIn.hidden = !showIn;
+    signOut.hidden = !showOut;
+  }
+
+  window.checkinAuth = { state: state };
+
+  fetch('/api/me', { headers: { 'accept': 'application/json' }, credentials: 'same-origin' })
+    .then(function (r) {
+      if (r.status === 401) {
+        if (protectedPage) { window.location.href = '/login?expired=1'; return null; }
+        state('out', 'Not signed in', true, false);
+        return null;
+      }
+      if (!r.ok) { throw new Error('me failed'); }
+      return r.json();
+    })
+    .then(function (me) {
+      if (!me) { return; }
+      state('in', '', false, true);
+      label.textContent = 'Signed in as ';
+      var who = document.createElement('span');
+      who.className = 'who';
+      who.textContent = me.name || me.phone_masked || 'your number';
+      label.appendChild(who);
+    })
+    .catch(function () {
+      state('error', 'Could not check your session.', true, false);
+    });
+})();
+</script>
+</div></body></html>{{end}}

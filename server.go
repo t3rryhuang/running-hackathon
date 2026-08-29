@@ -49,6 +49,12 @@ type Server struct {
 	afterFunc func(time.Duration, func()) *time.Timer
 	// loginLimiter throttles sign-in traffic per client address.
 	loginLimiter *ipLimiter
+	// codeCooldown and codeBudget throttle per number rather than per client,
+	// so switching IP does not buy more codes for somebody else's phone. Both
+	// are applied before the number is looked up, so they cannot be used to
+	// tell a registered number from an unregistered one.
+	codeCooldown *ipLimiter
+	codeBudget   *ipLimiter
 	// async tracks work started after a response has been written, so a test
 	// can wait for it rather than polling the database.
 	async sync.WaitGroup
@@ -69,6 +75,8 @@ func NewServer(cfg Config, store *Store, brain *Brain, tel Telephony, voice Voic
 		// Ten sign-in attempts per client per five minutes: generous for a
 		// person mistyping a code, useless for walking a list of numbers.
 		loginLimiter: newIPLimiter(10, 5*time.Minute),
+		codeCooldown: newIPLimiter(1, loginCodeCooldown),
+		codeBudget:   newIPLimiter(loginCodeRate, loginCodeWindow),
 	}
 }
 
@@ -638,8 +646,29 @@ func (s *Server) toolSaveOnboarding(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.store.SaveOnboarding(u, req.Name, req.Interests, req.Frequency); err != nil {
+	missing, err := s.store.SaveOnboarding(u, req.Name, req.Interests, req.Frequency)
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	// An agent that saves without a name has not finished the introduction, so
+	// the call is not ended and the profile is not stamped: it is sent back to
+	// ask, with the exact wording, rather than leaving somebody permanently
+	// nameless in the check-in flow.
+	if len(missing) > 0 {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":                  true,
+			"name":                u.Name,
+			"interests":           u.Interests,
+			"frequency":           u.Frequency,
+			"onboarding_complete": false,
+			"end_call":            false,
+			"missing":             missing,
+			"ask_next":            missing[0],
+			"question":            questionByKey(missing[0]).Prompt,
+			"instruction_to_agent": "Onboarding is not finished: " + strings.Join(missing, ", ") +
+				" still missing. Ask the question in `question` now, word for word, wait for their answer, and save again. Do not end the call.",
+		})
 		return
 	}
 	// The interview is the whole point of the onboarding call, so finishing it

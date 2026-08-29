@@ -197,9 +197,16 @@ func (s *Store) AllUsers() ([]User, error) {
 }
 
 // SaveOnboarding records what the voice agent learned during the onboarding
-// interview and stamps the user as onboarded.
-func (s *Store) SaveOnboarding(u *User, name, interests, frequency string) error {
-	if name = strings.TrimSpace(name); name != "" {
+// interview. It returns the fields the introduction still has not established,
+// and only stamps the user as onboarded once nothing essential is outstanding:
+// an interview that never got a name is not a finished interview, and stamping
+// it as one would move the person to check-ins and never ask again.
+//
+// The name is normalised the same way as an answer given over SMS, so "my name
+// is Sam" stores Sam and a whole sentence stores nothing rather than becoming
+// the name the agent greets them with.
+func (s *Store) SaveOnboarding(u *User, name, interests, frequency string) (missing []string, err error) {
+	if name = normaliseName(name); name != "" {
 		u.Name = name
 	}
 	if interests = normaliseInterests(interests); interests != "" {
@@ -208,11 +215,26 @@ func (s *Store) SaveOnboarding(u *User, name, interests, frequency string) error
 	if frequency = strings.TrimSpace(frequency); validFrequency(frequency) {
 		u.Frequency = frequency
 	}
+	if u.DisplayName() == "" {
+		missing = append(missing, "name")
+	}
+	if strings.TrimSpace(u.Interests) == "" {
+		missing = append(missing, "event_types")
+	}
+
 	now := time.Now().UTC()
-	u.OnboardedAt = &now
-	_, err := s.exec(`UPDATE users SET name=?, interests=?, frequency=?, onboarded_at=? WHERE id=?`,
-		u.Name, u.Interests, u.Frequency, now, u.ID)
-	return err
+	complete := len(missing) == 0
+	if complete {
+		u.OnboardedAt = &now
+		_, err = s.exec(`UPDATE users SET name=?, interests=?, frequency=?, onboarded_at=COALESCE(onboarded_at, ?) WHERE id=?`,
+			u.Name, u.Interests, u.Frequency, now, u.ID)
+		return nil, err
+	}
+	// Partial answers are still worth keeping - the next turn should not ask
+	// for what was already given - but the profile stays un-onboarded.
+	_, err = s.exec(`UPDATE users SET name=?, interests=?, frequency=? WHERE id=?`,
+		u.Name, u.Interests, u.Frequency, u.ID)
+	return missing, err
 }
 
 // MarkOnboarded stamps that the introduction finished. It writes nothing else:

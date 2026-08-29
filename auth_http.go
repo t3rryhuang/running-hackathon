@@ -26,6 +26,14 @@ func newIPLimiter(limit int, window time.Duration) *ipLimiter {
 }
 
 func (l *ipLimiter) allow(key string, now time.Time) bool {
+	ok, _ := l.take(key, now)
+	return ok
+}
+
+// take records a hit and reports whether it was allowed. When it was not, the
+// second return is how long the caller has to wait, which the login page shows
+// as a countdown instead of leaving somebody pressing a dead button.
+func (l *ipLimiter) take(key string, now time.Time) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	cutoff := now.Add(-l.window)
@@ -37,10 +45,14 @@ func (l *ipLimiter) allow(key string, now time.Time) bool {
 	}
 	l.hits[key] = kept
 	if len(kept) >= l.limit {
-		return false
+		wait := l.window - now.Sub(kept[0])
+		if wait < time.Second {
+			wait = time.Second
+		}
+		return false, wait
 	}
 	l.hits[key] = append(kept, now)
-	return true
+	return true, 0
 }
 
 func clientIP(r *http.Request) string {
@@ -103,7 +115,12 @@ func (s *Server) handleAuthRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	phone := normalisePhone(r.FormValue("phone"))
-	generic := map[string]any{"sent": true, "message": "If that number is registered, a code is on its way."}
+	generic := map[string]any{
+		"sent":       true,
+		"message":    "If that number is registered, a code is on its way.",
+		"resend_in":  int(loginCodeCooldown.Seconds()),
+		"expires_in": int(loginCodeTTL.Seconds()),
+	}
 	if !e164.MatchString(phone) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "Use the international format, like +447700900123."})
 		return
@@ -111,6 +128,20 @@ func (s *Server) handleAuthRequest(w http.ResponseWriter, r *http.Request) {
 	if !s.loginLimiter.allow(clientIP(r), time.Now()) {
 		s.store.RecordAuthEvent(phone, 0, "code_rate_limited", "ip")
 		writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "Too many attempts. Try again in a few minutes."})
+		return
+	}
+	// The per-number throttles are applied before the number is looked up, so
+	// a registered number and an unregistered one are throttled identically.
+	// Doing it the other way round would turn 429-versus-200 into an oracle for
+	// who has an account.
+	if ok, wait := s.codeCooldown.take(phone, time.Now()); !ok {
+		s.store.RecordAuthEvent(phone, 0, "code_rate_limited", "cooldown")
+		s.tooManyCodes(w, "You just asked for a code. Give it a moment before trying again.", wait)
+		return
+	}
+	if ok, wait := s.codeBudget.take(phone, time.Now()); !ok {
+		s.store.RecordAuthEvent(phone, 0, "code_rate_limited", "phone")
+		s.tooManyCodes(w, "Too many codes requested for that number. Try again shortly.", wait)
 		return
 	}
 	u, err := s.store.UserByPhone(phone)
@@ -122,7 +153,7 @@ func (s *Server) handleAuthRequest(w http.ResponseWriter, r *http.Request) {
 	code, err := s.store.IssueLoginCode(phone, time.Now())
 	if errors.Is(err, errRateLimited) {
 		s.store.RecordAuthEvent(phone, u.ID, "code_rate_limited", "phone")
-		writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "Too many codes requested. Try again in a few minutes."})
+		s.tooManyCodes(w, "Too many codes requested for that number. Try again shortly.", loginCodeWindow)
 		return
 	}
 	if err != nil {
@@ -130,11 +161,33 @@ func (s *Server) handleAuthRequest(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "Could not send a code just now."})
 		return
 	}
+	// A code that the provider could not deliver is worse than no code: it
+	// silently invalidates the previous one and eats the number's budget. So it
+	// is thrown away, and the person can ask again as soon as the cooldown is
+	// up. The response stays generic either way - whether Twilio is having a
+	// bad day is not something a login form should reveal per number.
 	if err := s.tel.SendSMS(phone, "Your CheckIn code is "+code+". It expires in 10 minutes."); err != nil {
-		log.Printf("auth: delivering code: %v", err)
+		log.Printf("auth: delivering code to a registered number failed: %v", err)
+		if derr := s.store.DiscardLoginCode(phone); derr != nil {
+			log.Printf("auth: discarding undelivered code: %v", derr)
+		}
+		s.store.RecordAuthEvent(phone, u.ID, "code_delivery_failed", "")
+		writeJSON(w, http.StatusOK, generic)
+		return
 	}
 	s.store.RecordAuthEvent(phone, u.ID, "code_sent", "")
 	writeJSON(w, http.StatusOK, generic)
+}
+
+// tooManyCodes answers a throttled request with the wait, so the page can show
+// a countdown rather than a dead end.
+func (s *Server) tooManyCodes(w http.ResponseWriter, msg string, wait time.Duration) {
+	secs := int(wait.Seconds() + 0.5)
+	if secs < 1 {
+		secs = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(secs))
+	writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": msg, "retry_after": secs})
 }
 
 // handleAuthVerify exchanges a code for a session. Verifying also records the
@@ -198,12 +251,25 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
+// maskPhone keeps the last four digits, which is enough for somebody to
+// recognise their own number and not enough to be worth shoulder-surfing.
+func maskPhone(phone string) string {
+	digits := strings.TrimSpace(phone)
+	if len(digits) <= 4 {
+		return digits
+	}
+	return "\u2022\u2022\u2022\u2022 " + digits[len(digits)-4:]
+}
+
+// handleMe is what the header uses to show who is signed in. It returns the
+// masked number rather than the number itself: the page only needs enough for
+// somebody to recognise their own account.
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request, u *User) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"name":      u.DisplayName(),
-		"phone":     u.Phone,
-		"onboarded": u.Onboarded(),
-		"interests": u.InterestList(),
+		"name":         u.DisplayName(),
+		"phone_masked": maskPhone(u.Phone),
+		"onboarded":    u.Onboarded(),
+		"interests":    u.InterestList(),
 	})
 }
 
@@ -300,7 +366,10 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
 		return
 	}
-	s.render(w, "login.html", map[string]any{})
+	s.render(w, "login.html", map[string]any{
+		"Expired":  r.URL.Query().Get("expired") != "",
+		"ResendIn": int(loginCodeCooldown.Seconds()),
+	})
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
@@ -312,5 +381,6 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "dashboard.html", map[string]any{
 		"User":       u,
 		"RetainDays": int(transcriptRetention.Hours() / 24),
+		"Protected":  true,
 	})
 }

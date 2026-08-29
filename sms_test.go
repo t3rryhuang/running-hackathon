@@ -40,9 +40,13 @@ type recordedSMS struct {
 	sms       []string
 	hangups   []string
 	hangupErr error
+	sendErr   error
 }
 
 func (r *recordedSMS) SendSMS(to, body string) error {
+	if r.sendErr != nil {
+		return r.sendErr
+	}
 	r.sms = append(r.sms, to+"|"+body)
 	return nil
 }
@@ -344,7 +348,7 @@ func TestToolSaveOnboardingMarksUserOnboarded(t *testing.T) {
 func TestSuggestEventPrefersStatedInterests(t *testing.T) {
 	srv, store, _, _ := newTestServer(t, nil)
 	u, _ := store.EnsureUser("+447700900141")
-	if err := store.SaveOnboarding(u, "", "hackathons", ""); err != nil {
+	if _, err := store.SaveOnboarding(u, "", "hackathons", ""); err != nil {
 		t.Fatalf("save onboarding: %v", err)
 	}
 	// The committed export has no London hackathon with a registration URL, so

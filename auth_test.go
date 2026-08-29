@@ -183,7 +183,7 @@ func TestSessionsResolveExpireAndRevoke(t *testing.T) {
 func TestSignInFlowResumesTheExistingProfile(t *testing.T) {
 	srv, store, tel, _ := newTestServer(t, &fakeAnthropic{})
 	u := settleChecklist(t, store, "+447700900105")
-	if err := store.SaveOnboarding(u, "Keanu", "hackathons", "daily"); err != nil {
+	if _, err := store.SaveOnboarding(u, "Keanu", "hackathons", "daily"); err != nil {
 		t.Fatalf("seed profile: %v", err)
 	}
 

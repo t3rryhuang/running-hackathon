@@ -28,7 +28,7 @@ func timedToolPost(t *testing.T, srv *Server, path string, body map[string]any) 
 func TestToolWebhooksStayWithinTheirLatencyBudget(t *testing.T) {
 	srv, store, _, _ := newTestServer(t, &fakeAnthropic{})
 	u := settleChecklist(t, store, "+447700900201")
-	if err := store.SaveOnboarding(u, "Keanu", "hackathons", "daily"); err != nil {
+	if _, err := store.SaveOnboarding(u, "Keanu", "hackathons", "daily"); err != nil {
 		t.Fatalf("seed profile: %v", err)
 	}
 
@@ -79,7 +79,7 @@ func TestTranscriptWebhookAnswersBeforeItStores(t *testing.T) {
 func TestCallCarriesTheOpeningLineSoTheAgentNeedNotAskForIt(t *testing.T) {
 	srv, store, _, voice := newTestServer(t, &fakeAnthropic{})
 	u := settleChecklist(t, store, "+447700900203")
-	if err := store.SaveOnboarding(u, "Keanu", "hackathons", "daily"); err != nil {
+	if _, err := store.SaveOnboarding(u, "Keanu", "hackathons", "daily"); err != nil {
 		t.Fatalf("seed profile: %v", err)
 	}
 	if err := store.MarkPhoneVerified(u.ID, "sms"); err != nil {

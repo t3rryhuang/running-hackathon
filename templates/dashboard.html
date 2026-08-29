@@ -5,7 +5,7 @@
 <div class="panel">
   <label for="q">Search your calls</label>
   <input id="q" type="search" placeholder="a word you said, or a summary" autocomplete="off">
-  <button id="signout">Sign out</button>
+  <button id="signout" class="ghost">Sign out</button>
 </div>
 
 <div class="status" id="status" role="status" aria-live="polite">Loading your calls…</div>
@@ -84,7 +84,7 @@
     say('Loading your calls…');
     fetch('/api/transcripts?page=' + page + '&q=' + encodeURIComponent(q.value), { headers: { accept: 'application/json' } })
       .then(function (r) {
-        if (r.status === 401) { window.location.href = '/login'; return null; }
+        if (r.status === 401) { window.location.href = '/login?expired=1'; return null; }
         if (!r.ok) throw new Error();
         return r.json();
       })

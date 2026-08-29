@@ -108,6 +108,12 @@ const (
 
 var errNotCurrentItem = errors.New("that is not the question currently on the table")
 
+// errUnusableAnswer means the reply was on-topic enough to look like an answer
+// but did not yield a value worth storing - a whole sentence where a name was
+// asked for, say. The item stays open so the question gets asked again rather
+// than the profile silently keeping the field empty forever.
+var errUnusableAnswer = errors.New("that reply did not contain a usable answer")
+
 type Session struct {
 	ID        int64
 	UserID    int64
@@ -356,7 +362,7 @@ func (s *Store) RecordChecklistAnswer(u *User, sessionID int64, key, status, ans
 		case "interests":
 			interests := normaliseInterests(answer)
 			if interests == "" {
-				return nil
+				return errUnusableAnswer
 			}
 			if _, err := s.txExec(tx, `UPDATE users SET interests=? WHERE id=?`, interests, u.ID); err != nil {
 				return err
@@ -365,7 +371,7 @@ func (s *Store) RecordChecklistAnswer(u *User, sessionID int64, key, status, ans
 		case "name":
 			name := normaliseName(answer)
 			if name == "" {
-				return nil
+				return errUnusableAnswer
 			}
 			if _, err := s.txExec(tx, `UPDATE users SET name=? WHERE id=?`, name, u.ID); err != nil {
 				return err

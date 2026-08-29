@@ -17,7 +17,7 @@ func signedUp(t *testing.T, store *Store, phone, name, interests, frequency stri
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	if err := store.SaveOnboarding(u, name, interests, frequency); err != nil {
+	if _, err := store.SaveOnboarding(u, name, interests, frequency); err != nil {
 		t.Fatalf("save onboarding: %v", err)
 	}
 	if err := store.MarkPhoneVerified(u.ID, "signup"); err != nil {
@@ -136,7 +136,7 @@ func TestCallerContextUnverifiedPhoneWithholdsName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensure user: %v", err)
 	}
-	if err := store.SaveOnboarding(u, "Terry", "meetups", "daily"); err != nil {
+	if _, err := store.SaveOnboarding(u, "Terry", "meetups", "daily"); err != nil {
 		t.Fatalf("save onboarding: %v", err)
 	}
 	u, _ = store.UserByPhone("+447700900304")

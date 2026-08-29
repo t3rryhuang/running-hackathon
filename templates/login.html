@@ -2,6 +2,8 @@
 <h1>Sign in</h1>
 <p class="sub">We text a six-digit code to your number. No password to forget.</p>
 
+{{if .Expired}}<p class="banner" role="status">Your session has ended. Sign in again to see your calls.</p>{{end}}
+
 <form id="phone-step" class="panel" method="post" action="/auth/request">
   <label for="phone">Your number</label>
   <input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="+44 7700 900123" required>
@@ -9,10 +11,12 @@
 </form>
 
 <form id="code-step" class="panel" method="post" action="/auth/verify" hidden>
+  <p class="hint" id="sent-to"></p>
   <label for="code">Six-digit code</label>
   <input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required>
   <button type="submit" id="verify">Sign in</button>
-  <p class="hint">Codes last ten minutes and work once. <a href="#" id="resend">Send another</a>.</p>
+  <button type="button" class="quiet" id="resend" disabled>Send another code</button>
+  <p class="hint">Codes last ten minutes and work once.</p>
 </form>
 
 <div class="status" id="status" role="status" aria-live="polite"></div>
@@ -24,46 +28,85 @@
   var codeStep = document.getElementById('code-step');
   var status = document.getElementById('status');
   var phone = document.getElementById('phone');
+  var send = document.getElementById('send');
+  var verify = document.getElementById('verify');
+  var resend = document.getElementById('resend');
+  var cooldown = {{.ResendIn}};
+  var ticker = null;
 
   function say(msg, bad) {
     status.textContent = msg;
     status.className = bad ? 'status err' : 'status';
   }
 
-  function post(url, body, onOK) {
+  // Resend is disabled for exactly as long as the server would refuse it, so
+  // the button never lies about being available.
+  function holdResend(seconds) {
+    if (ticker) { clearInterval(ticker); }
+    var left = seconds;
+    resend.disabled = true;
+    function tick() {
+      resend.textContent = left > 0 ? 'Send another code in ' + left + 's' : 'Send another code';
+      if (left <= 0) { clearInterval(ticker); ticker = null; resend.disabled = false; return; }
+      left -= 1;
+    }
+    tick();
+    ticker = setInterval(tick, 1000);
+  }
+
+  function post(url, body, button, onOK) {
     say('Working…');
+    if (button) { button.disabled = true; button.classList.add('is-loading'); }
     fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded', 'accept': 'application/json' },
       body: new URLSearchParams(body)
     }).then(function (r) {
-      return r.json().then(function (data) { return { ok: r.ok, data: data }; });
+      return r.json().then(function (data) { return { ok: r.ok, status: r.status, data: data }; });
     }).then(function (res) {
-      if (!res.ok) { say(res.data.error || 'Something went wrong.', true); return; }
+      if (!res.ok) {
+        say(res.data.error || 'Something went wrong.', true);
+        if (res.status === 429 && res.data.retry_after) { holdResend(res.data.retry_after); }
+        return;
+      }
       onOK(res.data);
-    }).catch(function () { say('Network trouble — try again.', true); });
+    }).catch(function () {
+      say('We could not reach CheckIn. Check your connection and try again.', true);
+    }).then(function () {
+      if (button) { button.disabled = false; button.classList.remove('is-loading'); }
+    });
+  }
+
+  function codeSent(data) {
+    phoneStep.hidden = true;
+    codeStep.hidden = false;
+    // Deliberately not "code sent": the server answers the same way for an
+    // unregistered number and for a delivery the provider dropped, so the page
+    // must not claim a text is on its way when it may not be.
+    document.getElementById('sent-to').textContent = 'Enter the code texted to ' + phone.value.trim() + '. Nothing arrived? Send another once the timer is up.';
+    document.getElementById('code').focus();
+    say(data.message || 'If that number is registered, a code is on its way.');
+    holdResend(data.resend_in || cooldown);
   }
 
   phoneStep.addEventListener('submit', function (e) {
     e.preventDefault();
-    post('/auth/request', { phone: phone.value }, function (data) {
-      phoneStep.hidden = true;
-      codeStep.hidden = false;
-      document.getElementById('code').focus();
-      say(data.message || 'Code sent.');
-    });
+    post('/auth/request', { phone: phone.value }, send, codeSent);
   });
 
   codeStep.addEventListener('submit', function (e) {
     e.preventDefault();
-    post('/auth/verify', { phone: phone.value, code: document.getElementById('code').value }, function () {
+    post('/auth/verify', { phone: phone.value, code: document.getElementById('code').value }, verify, function () {
+      say('Signed in. Taking you to your calls…');
       window.location.href = '/dashboard';
     });
   });
 
-  document.getElementById('resend').addEventListener('click', function (e) {
-    e.preventDefault();
-    post('/auth/request', { phone: phone.value }, function (data) { say(data.message || 'Code sent.'); });
+  resend.addEventListener('click', function () {
+    post('/auth/request', { phone: phone.value }, resend, function (data) {
+      say(data.message || 'If that number is registered, a code is on its way.');
+      holdResend(data.resend_in || cooldown);
+    });
   });
 })();
 </script>

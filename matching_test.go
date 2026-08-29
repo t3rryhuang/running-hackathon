@@ -213,7 +213,7 @@ func TestSuggestEventToolReportsNoMatchHonestly(t *testing.T) {
 	srv := NewServer(cfg, store, brain, &recordedSMS{}, &recordedVoice{}, NewCalendar())
 
 	u, _ := store.EnsureUser("+447700900151")
-	if err := store.SaveOnboarding(u, "Keanu", "hardware", ""); err != nil {
+	if _, err := store.SaveOnboarding(u, "Keanu", "hardware", ""); err != nil {
 		t.Fatalf("onboarding: %v", err)
 	}
 

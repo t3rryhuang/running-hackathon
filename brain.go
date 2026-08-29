@@ -219,6 +219,11 @@ const onboardingDeclinedLine = "No problem, I won't check in on a schedule. You'
 // than being filled in on the person's behalf.
 const reAskLine = "I didn't catch an answer there, so I'll leave that one open. "
 
+// unusableLine covers a reply that was clearly meant as an answer but did not
+// contain one that can be stored, so the question is put again rather than the
+// field being left quietly empty.
+const unusableLine = "Sorry, I didn't get that. "
+
 // OnboardingTurn runs one turn of the introduction on any channel. It is
 // deterministic - no model, one question per turn, in template order - and an
 // item only leaves "unanswered" when the person actually said something. The
@@ -248,6 +253,9 @@ func (b *Brain) OnboardingTurn(u *User, channel, inbound string) string {
 		return reAskLine + current.Prompt
 	}
 	if _, err := b.store.RecordChecklistAnswer(u, sess.ID, current.Key, status, answer); err != nil {
+		if errors.Is(err, errUnusableAnswer) {
+			return unusableLine + current.Prompt
+		}
 		log.Printf("onboarding: record %s for user %d: %v", current.Key, u.ID, err)
 		return current.Prompt
 	}
@@ -342,6 +350,9 @@ func (b *Brain) interviewReply(u *User, inbound string) (string, bool) {
 		return reAskLine + current.Prompt, true
 	}
 	if _, err := b.store.RecordChecklistAnswer(u, sess.ID, current.Key, status, answer); err != nil {
+		if errors.Is(err, errUnusableAnswer) {
+			return unusableLine + current.Prompt, true
+		}
 		log.Printf("checklist: record %s for user %d: %v", current.Key, u.ID, err)
 		return current.Prompt, true
 	}

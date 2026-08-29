@@ -1,0 +1,13 @@
+{{define "confirm.html"}}{{template "head" .}}
+<h1>You're in.</h1>
+{{if eq .Channel "sms"}}
+<p class="sub">Expect a text at <strong>{{.Phone}}</strong> shortly &mdash; just reply to it and we'll start your first check-in. Frequency: {{.Frequency}}.</p>
+{{else}}
+<p class="sub">Expect a call on <strong>{{.Phone}}</strong> at your next check-in. Frequency: {{.Frequency}}.</p>
+{{end}}
+<div class="card">
+  <div class="when">Your journal</div>
+  <a href="/journal?phone={{.Phone}}">/journal?phone={{.Phone}}</a>
+</div>
+<p class="hint"><a href="/">Sign up another number</a></p>
+{{template "foot" .}}{{end}}

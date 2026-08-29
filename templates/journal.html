@@ -1,0 +1,30 @@
+{{define "journal.html"}}{{template "head" .}}
+{{if .Error}}
+<h1>Journal</h1>
+<div class="err">{{.Error}}</div>
+<p class="hint"><a href="/">Sign up</a></p>
+{{else}}
+<h1>{{if .User.Name}}{{.User.Name}}'s journal{{else}}Your journal{{end}}</h1>
+<p class="sub">{{.User.Phone}} &middot; {{.User.Channel}} &middot; {{.User.Frequency}}</p>
+
+{{if .Events}}
+<h2>Signed up for</h2>
+{{range .Events}}
+<div class="card">
+  <div><a href="{{.URL}}">{{.Title}}</a></div>
+  <div class="when">{{.When}}</div>
+</div>
+{{end}}
+{{end}}
+
+<h2>Check-ins</h2>
+{{if not .Checkins}}<p class="sub">Nothing yet. Reply to your next check-in text and it'll show up here.</p>{{end}}
+{{range .Checkins}}
+<div class="card">
+  <div class="when">{{.When}} &middot; <span class="mood">{{.Mood}}</span></div>
+  <div>{{.Summary}}</div>
+  {{if .Topics}}<div class="topics">{{.Topics}}</div>{{end}}
+</div>
+{{end}}
+{{end}}
+{{template "foot" .}}{{end}}

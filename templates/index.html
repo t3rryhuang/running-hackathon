@@ -1,0 +1,34 @@
+{{define "index.html"}}{{template "head" .}}
+<h1>CheckIn</h1>
+<p class="sub">A daily check-in by text or call. It remembers what you said, knows what's on your calendar, and nudges you out of the house when you need it.</p>
+
+{{if .Error}}<div class="err">{{.Error}}</div>{{end}}
+
+<form method="post" action="/signup">
+  <label for="name">Your name <span style="color:var(--muted)">(optional)</span></label>
+  <input type="text" id="name" name="name" placeholder="Keanu" autocomplete="given-name">
+
+  <label for="phone">Phone number</label>
+  <input type="tel" id="phone" name="phone" placeholder="+447700900123" pattern="\+[1-9][0-9]{7,14}" required>
+  <div class="hint">E.164 format, including country code.</div>
+
+  <label>How should I reach you?</label>
+  <div class="radios">
+    <label><input type="radio" name="channel" value="sms" checked>Text</label>
+    <label><input type="radio" name="channel" value="call">Call</label>
+  </div>
+
+  <label for="frequency">How often?</label>
+  <select id="frequency" name="frequency">
+    <option value="daily">Daily</option>
+    <option value="twice-daily">Twice daily</option>
+    <option value="weekdays">Weekdays only</option>
+  </select>
+
+  <label for="ics_url">Calendar ICS URL <span style="color:var(--muted)">(optional)</span></label>
+  <input type="url" id="ics_url" name="ics_url" placeholder="https://calendar.google.com/calendar/ical/.../basic.ics">
+  <div class="hint">So I can ask how that 3pm went.</div>
+
+  <button type="submit">Start checking in</button>
+</form>
+{{template "foot" .}}{{end}}

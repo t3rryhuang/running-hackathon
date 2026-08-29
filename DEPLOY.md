@@ -55,6 +55,12 @@ Environment handling:
 - `TWILIO_AUTH_TOKEN` being set turns on inbound signature verification,
   computed over the public HTTPS URL. Caddy must forward `Host` and
   `X-Forwarded-Proto` (its defaults do) or `/sms` will 403 legitimate traffic.
+- `ELEVENLABS_WEBHOOK_SECRET` must be exported too. Post-call transcript
+  deliveries to `/webhooks/elevenlabs` are rejected without it, silently as far
+  as the dashboard is concerned — it will simply show no calls. Check with
+  `journalctl -u runhack | grep transcript`.
+- Sign-in codes go out over Twilio, so `/login` only works on a box where
+  Twilio is configured. Without it a code is generated and never delivered.
 - Secrets live only in `/opt/runhack/.env` (operator-owned, mode 600). Nothing
   in this repo, including these scripts, ever contains one.
 

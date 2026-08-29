@@ -84,9 +84,14 @@ audited. Revocation is immediate and does not require deletion.
 
 - `POST /forget {phone}` erases the user and everything referencing them
   (profile, journal, messages, sessions, checklist, consents, signals,
-  suggestions) in one transaction. Only the user id is logged.
+  suggestions, call transcripts, sign-in sessions, outstanding login codes and
+  their audit rows) in one transaction. Only the user id is logged.
 - A retention sweeper runs hourly and deletes signals past `expires_at`, so
-  sensitive observations expire without anyone asking.
+  sensitive observations expire without anyone asking. The same sweep drops
+  transcripts older than 90 days, expired or revoked sign-in sessions, spent
+  login codes, and audit rows older than 180 days.
+- A signed-in user can delete any single transcript themselves from the
+  dashboard (`DELETE /api/transcripts/{id}`), scoped to their own id.
 
 ### Ingestion API
 
@@ -145,6 +150,29 @@ its status attached.
 Voice uses the same machine over `POST /tools/next_question` and
 `POST /tools/save_answer` (which returns the next question, or a conflict if the
 agent answers out of order).
+
+## Call transcripts and sign-in
+
+| Data | Kept for | Stored as |
+| --- | --- | --- |
+| Call transcript (text, summary, metadata) | 90 days | Plain text, owned by one `user_id` |
+| Sign-in session | 30 days, or until logout | SHA-256 of the token, never the token |
+| One-time login code | 10 minutes, single use | SHA-256 of the code, never the code |
+| Auth audit row (requested, failed, signed in, signed out, deleted) | 180 days | Phone + event, no code, no token |
+
+- A transcript is filed against the number the provider actually dialled. A
+  delivery whose number matches no user is dropped: a transcript never creates a
+  profile, and is never attached to a guess.
+- Transcripts are visible only to the signed-in owner. Every read, search and
+  delete carries `user_id` in its `WHERE` clause, and another user's transcript
+  returns "not found" rather than "forbidden", so its existence is not
+  disclosed.
+- A code is generated with `crypto/rand`, exists in the clear only in the SMS,
+  and is never logged or included in an HTTP response. Requesting a code for an
+  unregistered number returns exactly what a registered one returns.
+- Signing in marks the number verified (`phone_verified_via=otp`) and resumes
+  the existing profile and checklist state — a returning user is never asked to
+  onboard twice.
 
 ## Webhook idempotency
 

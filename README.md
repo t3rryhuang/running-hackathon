@@ -90,6 +90,7 @@ RUNHACK_TEST_DATABASE_URL='postgres://runhack:test@127.0.0.1:55432/runhack?sslmo
 | `ELEVENLABS_API_BASE` | no | Defaults to `https://api.elevenlabs.io` |
 | `ELEVENLABS_AGENT_ID` | yes | Conversational agent that runs the call |
 | `ELEVENLABS_PHONE_ID` | yes | The agent's Twilio number id in ElevenLabs |
+| `ELEVENLABS_WEBHOOK_SECRET` | yes | Verifies the `elevenlabs-signature` HMAC on post-call transcript deliveries. Without it every delivery is rejected |
 | `ANTHROPIC_API_KEY` | yes | SMS brain |
 | `ANTHROPIC_MODEL` | no | Defaults to `claude-sonnet-5` |
 | `TOOL_WEBHOOK_SECRET` | yes | Shared secret for `/tools/*` (`X-Webhook-Secret`) |
@@ -155,6 +156,23 @@ curl -s -X POST localhost:8090/tools/next_question -H "$S" -d '{"phone":"+447700
 curl -s -X POST localhost:8090/tools/save_answer   -H "$S" \
   -d '{"phone":"+447700900123","channel":"call","key":"event_types","status":"answered","answer":"hackathons","idempotency_key":"conv1-q1"}'
 
+# post-call transcripts from ElevenLabs (HMAC-signed, not the shared secret)
+# signature: elevenlabs-signature: t=<unix>,v0=<hex hmac-sha256 of "<t>.<raw body>">
+curl -s -X POST localhost:8090/webhooks/elevenlabs \
+  -H "elevenlabs-signature: t=1756480000,v0=<digest>" \
+  -d '{"type":"post_call_transcription","data":{...}}'
+
+# phone + one-time code sign-in (the code is sent by SMS, never returned here)
+curl -s -X POST localhost:8090/auth/request -d '{"phone":"+447700900123"}'
+curl -s -X POST localhost:8090/auth/verify  -d '{"phone":"+447700900123","code":"123456"}' -c jar
+curl -s -X POST localhost:8090/auth/logout -b jar
+
+# the signed-in user's own data (session cookie only - no phone in the query)
+curl -s -b jar "localhost:8090/api/me"
+curl -s -b jar "localhost:8090/api/transcripts?q=hackathon&page=1"
+curl -s -b jar "localhost:8090/api/transcripts/42"
+curl -s -b jar -X DELETE "localhost:8090/api/transcripts/42"
+
 # consent, structured ingestion, inspection and erasure (same shared secret)
 curl -s -X POST localhost:8090/consent -H "$S" -d '{"phone":"+447700900123","scope":"heart_rate","granted":true,"source":"sms:yes"}'
 curl -s -X POST localhost:8090/ingest  -H "$S" \
@@ -165,6 +183,30 @@ curl -s -X POST localhost:8090/forget  -H "$S" -d '{"phone":"+447700900123"}'
 
 `/tools/*` returns `401 {"error":"unauthorized"}` without a matching `X-Webhook-Secret`
 (and also when `TOOL_WEBHOOK_SECRET` is unset, so an unconfigured box is closed by default).
+
+## Sign-in and the dashboard
+
+`/login` takes a phone number, texts a six-digit code, and exchanges it for a session
+cookie; `/dashboard` then lists that user's own call transcripts with search, pagination
+and per-transcript deletion. The rules the implementation holds to:
+
+- Codes are random (`crypto/rand`), single-use, expire after 10 minutes, allow 5 wrong
+  attempts, and are limited to 3 requests per number per 15 minutes plus an IP limit.
+- **Only the hash of a code or a session token is ever stored**, and a code is never
+  logged or returned in a response - the SMS is the only place it exists in the clear.
+- An unknown number gets the same answer as a known one, so the endpoint cannot be used
+  to test whether somebody is registered.
+- Signing in marks the number verified and resumes the existing profile; a returning user
+  never repeats onboarding.
+- Every transcript query is scoped to the session's user id. Another user's transcript is
+  `404`, not `403`, so its existence is not disclosed.
+- Transcripts are kept 90 days, sessions 30 days, the audit trail 180 days; `/forget`
+  removes transcripts, sessions, codes and audit rows along with the profile.
+
+Transcripts arrive at `/webhooks/elevenlabs` (`post_call_transcription`). The handler
+verifies the HMAC and the timestamp, answers `200` immediately, and stores asynchronously,
+keyed on the provider's `conversation_id` so a retried delivery updates one row. A delivery
+for a number that matches no user is dropped - a transcript never creates a profile.
 
 ## Deployment notes for the operator
 

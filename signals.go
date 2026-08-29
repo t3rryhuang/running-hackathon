@@ -247,16 +247,31 @@ func (s *Store) PurgeExpiredSignals(now time.Time) (int64, error) {
 	return total, nil
 }
 
-// RunRetention sweeps expired signals hourly until stop closes.
+// sweep is one pass of every retention rule: sensitive observations past their
+// window, transcripts past ninety days, and spent codes, dead sessions and old
+// audit rows. Each is independent, so one failure must not skip the rest.
+func (s *Store) sweep(now time.Time) {
+	if n, err := s.PurgeExpiredSignals(now); err != nil {
+		log.Printf("retention: signals: %v", err)
+	} else if n > 0 {
+		log.Printf("retention: deleted %d expired signals", n)
+	}
+	if n, err := s.PurgeExpiredTranscripts(now); err != nil {
+		log.Printf("retention: transcripts: %v", err)
+	} else if n > 0 {
+		log.Printf("retention: deleted %d expired transcripts", n)
+	}
+	if err := s.PurgeExpiredAuth(now); err != nil {
+		log.Printf("retention: auth: %v", err)
+	}
+}
+
+// RunRetention sweeps expired data hourly until stop closes.
 func (s *Store) RunRetention(stop <-chan struct{}) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
 	for {
-		if n, err := s.PurgeExpiredSignals(time.Now()); err != nil {
-			log.Printf("retention: %v", err)
-		} else if n > 0 {
-			log.Printf("retention: deleted %d expired signals", n)
-		}
+		s.sweep(time.Now())
 		select {
 		case <-stop:
 			return

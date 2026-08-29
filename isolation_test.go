@@ -158,6 +158,21 @@ func TestForgetUserErasesEverything(t *testing.T) {
 	if _, err := store.EnsureSession(u, "sms", FlowFor(u)); err != nil {
 		t.Fatalf("session: %v", err)
 	}
+	if err := store.SaveTranscript(&Transcript{
+		UserID: u.ID, ConversationID: "conv_forget", Body: "call text", StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("transcript: %v", err)
+	}
+	code, err := store.IssueLoginCode(u.Phone, time.Now())
+	if err != nil {
+		t.Fatalf("login code: %v", err)
+	}
+	token, err := store.StartAuthSession(u.ID, time.Now())
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+	store.RecordAuthEvent(u.Phone, u.ID, "login_ok", "")
+
 	if err := store.ForgetUser(u.ID); err != nil {
 		t.Fatalf("forget: %v", err)
 	}
@@ -166,5 +181,51 @@ func TestForgetUserErasesEverything(t *testing.T) {
 	}
 	if r := store.LatestSignal(u.ID, KindHeartRate, time.Now()); r.Known {
 		t.Error("signal survived erasure")
+	}
+	if _, total, err := store.Transcripts(u.ID, "", 10, 0); err != nil || total != 0 {
+		t.Errorf("transcript survived erasure: %d (%v)", total, err)
+	}
+	if _, err := store.AuthSessionUser(token, time.Now()); err == nil {
+		t.Error("sign-in session survived erasure")
+	}
+	// The code was keyed by phone rather than user id, so it needs its own
+	// clause in ForgetUser - erasure must not leave a usable way back in.
+	if err := store.ConsumeLoginCode(u.Phone, code, time.Now()); err == nil {
+		t.Error("login code survived erasure")
+	}
+	if events, err := store.AuthEvents(u.Phone, 10); err != nil || len(events) != 0 {
+		t.Errorf("audit rows survived erasure: %v (%v)", events, err)
+	}
+}
+
+// The hourly sweep is where retention actually happens; each rule has its own
+// window and one failing must not stop the others.
+func TestRetentionSweepClearsTranscriptsAndDeadSessions(t *testing.T) {
+	store := testStore(t)
+	now := time.Now()
+	u := mustUser(t, store, "+447700900015")
+	if err := store.SaveTranscript(&Transcript{
+		UserID: u.ID, ConversationID: "conv_old", Body: "ancient", StartedAt: now.Add(-transcriptRetention - time.Hour),
+	}); err != nil {
+		t.Fatalf("old transcript: %v", err)
+	}
+	if err := store.SaveTranscript(&Transcript{
+		UserID: u.ID, ConversationID: "conv_recent", Body: "recent", StartedAt: now.Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("recent transcript: %v", err)
+	}
+	token, err := store.StartAuthSession(u.ID, now.Add(-authSessionTTL-time.Hour))
+	if err != nil {
+		t.Fatalf("stale session: %v", err)
+	}
+
+	store.sweep(now)
+
+	items, total, err := store.Transcripts(u.ID, "", 10, 0)
+	if err != nil || total != 1 || items[0].ConversationID != "conv_recent" {
+		t.Fatalf("sweep kept the wrong transcripts: %d %v (%v)", total, items, err)
+	}
+	if _, err := store.AuthSessionUser(token, now); err == nil {
+		t.Error("expired session still resolves after the sweep")
 	}
 }

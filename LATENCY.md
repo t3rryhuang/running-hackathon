@@ -120,6 +120,64 @@ These dominate perceived latency and cannot be fixed from the Go service:
 - `/metrics` is unauthenticated. It contains timings only — no phone numbers, no
   journal content — and the operator needs it reachable during a demo.
 
+## Pass 2 — after the onboarding split, transcripts and sign-in
+
+Three new things landed on or near the conversational path since the numbers
+above: the onboarding/check-in split (an extra checklist read per turn), the
+post-call transcript webhook, and phone + code sign-in. Re-measured against the
+release binary (SQLite on local disk, 30 requests per tool, 20 signed transcript
+deliveries):
+
+| Operation             | p50      | p95      | max      |
+|-----------------------|----------|----------|----------|
+| `tool.get_context`    | 0.28 ms  | 0.29 ms  | 0.30 ms  |
+| `tool.next_question`  | 0.24 ms  | 0.26 ms  | 0.87 ms  |
+| `tool.suggest_event`  | 1.74 ms  | 1.90 ms  | 2.36 ms  |
+| `http.transcript`     | 0.03 ms  | 0.04 ms  | 0.10 ms  |
+
+Nothing regressed: `get_context` moved 0.22 → 0.28 ms after gaining the
+checklist read, which is inaudible. The transcript webhook is the fastest thing
+in the table *because* it only verifies the signature and hands off — the
+database write happens after the 200 (`Server.storeTranscript`), which is what
+the provider's retry behaviour wants.
+
+Methodology: release binary, loopback HTTP, warm process, read back from
+`/metrics` (which reports p50/p95/max over the last 200 samples per operation).
+Loopback removes network time deliberately — the point is the server's own cost,
+because that is the only part of the silence this code owns. No live call was
+placed; every provider number below is a TLS handshake to a public endpoint with
+no API request.
+
+### What pass 2 changed
+
+- **Warm path stays warm** (`voice.go`): the boot-time handshake only helped the
+  first call the process ever placed. DNS entries expire and idle connections
+  are dropped, so a call placed hours after boot paid full setup again. A
+  4-minute ticker (just under the transport's 5-minute idle timeout) re-primes
+  it. Measured cost of a cold path from this box: **72 ms** to
+  `api.elevenlabs.io`, 20 ms to `api.twilio.com` — per call, if it goes cold.
+- **The first thing the caller hears needs no round trip.** `first_message` is
+  `{{greeting}}`, and the greeting is computed from the stored profile and sent
+  with the dial, so the agent speaks without calling `get_context` first. That
+  removes one webhook round trip from the gap between "answer" and "first
+  audio". `TestCallCarriesTheOpeningLineSoTheAgentNeedNotAskForIt` fails if
+  anyone regresses the greeting back into a tool call.
+- **Regression tests, not just numbers** (`latency_test.go`): every tool webhook
+  and the transcript delivery must complete within 150 ms per request, and
+  `/metrics` must still cover them. The budget is generous on purpose — it
+  catches "somebody put a provider call on the hot path", not millisecond drift.
+
+### Still operator-side after pass 2
+
+Unchanged from §"Requires operator / provider configuration" above, and still
+the dominant term: the agent's STT → LLM → TTS choice and the number/agent
+region. Concretely, in order of expected effect on a live call: a Flash/Turbo
+TTS model, a small LLM for the agent, tight turn-detection settings, and a
+European media region for the phone number. Everything measurable in this
+repository is now three orders of magnitude below one syllable of speech, so
+further Go-side work has nothing left to win — the next honest measurement has
+to come from a live call with the provider's own latency breakdown.
+
 ## How to verify on the Pi
 
 ```bash

@@ -99,8 +99,29 @@ func NewVoice(cfg Config) Voice {
 		},
 		baseURL: base + elevenLabsOutboundPath,
 	}
-	go v.warm()
+	go v.keepWarm(warmInterval)
 	return v
+}
+
+// warmInterval sits just under the transport's idle timeout, so the path to the
+// provider is re-primed before anything it depends on goes cold.
+const warmInterval = 4 * time.Minute
+
+// keepWarm re-primes the connection path on a timer. A single handshake at boot
+// only helps the first call of the process: DNS entries expire and idle
+// connections are dropped, so a call placed hours later pays the full setup
+// cost again. Each tick is a TLS handshake and nothing more — no API request,
+// no call, nothing billable.
+func (v *elevenLabsVoice) keepWarm(every time.Duration) {
+	v.warm()
+	if every <= 0 {
+		return
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for range t.C {
+		v.warm()
+	}
 }
 
 // warm opens the TLS connection to the provider at boot so the first real call

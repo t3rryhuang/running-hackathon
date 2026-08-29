@@ -82,6 +82,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("/journal", s.handleJournal)
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/metrics", s.handleMetrics)
+	mux.HandleFunc("/version", s.handleVersion)
 	mux.HandleFunc("/trigger", s.handleTrigger)
 	// Tool webhooks land mid-conversation: their server time is dead air the
 	// caller hears, so each one is measured separately.
@@ -105,6 +106,13 @@ func (s *Server) Routes() *http.ServeMux {
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("content-type", "text/plain")
 	fmt.Fprint(w, "ok")
+}
+
+// handleVersion reports which commit is actually running, so a deploy can be
+// verified and drift between the repo and the Pi can be detected from outside
+// the box. No auth: it contains nothing sensitive.
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, buildInfo(s.cfg))
 }
 
 // handleMetrics exposes the in-process latency summary. No auth: it is timings
@@ -416,6 +424,17 @@ func (s *Server) TriggerCheckin(u *User) error {
 	return s.store.AddMessage(u.ID, "assistant", body)
 }
 
+// callerContext resolves what is already on file for this person, so both the
+// outbound call variables and /tools/get_context describe the same closed
+// world.
+func (s *Server) callerContext(u *User) CallerContext {
+	var items []ChecklistItem
+	if sess, err := s.store.EnsureSession(u, "call"); err == nil {
+		items, _ = s.store.Checklist(u.ID, sess.ID)
+	}
+	return buildCallerContext(u.Phone, u, items)
+}
+
 // placeCall rings the user and remembers the Twilio call SID ElevenLabs reports
 // back, which is what lets the service hang up when onboarding finishes.
 func (s *Server) placeCall(u *User) error {
@@ -423,7 +442,10 @@ func (s *Server) placeCall(u *User) error {
 	// fetch the calendar while the phone is still ringing.
 	go s.brain.WarmCalendar(u)
 	defer track("call.place")()
-	res, err := s.voice.Call(CallRequest{To: u.Phone, Name: u.Name, Onboarded: u.Onboarded()})
+	res, err := s.voice.Call(CallRequest{
+		To: u.Phone, Name: u.Name, Onboarded: u.Onboarded(),
+		Vars: s.callerContext(u).DynamicVariables(),
+	})
 	if err != nil {
 		return err
 	}
@@ -512,11 +534,48 @@ func (s *Server) toolUser(w http.ResponseWriter, r *http.Request) (*User, toolRe
 	return u, req, true
 }
 
+// toolLookupUser resolves the caller strictly by phone number and does not
+// create anything. An unrecognised number returns a nil user, which the caller
+// must report as unresolved rather than fill in.
+func (s *Server) toolLookupUser(w http.ResponseWriter, r *http.Request) (*User, toolRequest, bool) {
+	var req toolRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
+		return nil, req, false
+	}
+	phone := normalisePhone(req.Phone)
+	if phone == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "phone required"})
+		return nil, req, false
+	}
+	u, err := s.store.UserByPhone(phone)
+	if err != nil {
+		return nil, req, true
+	}
+	return u, req, true
+}
+
 func (s *Server) toolGetContext(w http.ResponseWriter, r *http.Request) {
-	u, _, ok := s.toolUser(w, r)
+	u, req, ok := s.toolLookupUser(w, r)
 	if !ok {
 		return
 	}
+	// A number with no profile behind it is reported as unresolved. Nothing is
+	// invented, and no other user's record is ever offered in its place.
+	if u == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"caller":          buildCallerContext(normalisePhone(req.Phone), nil, nil),
+			"name":            "",
+			"onboarded":       false,
+			"interests":       "",
+			"frequency":       "",
+			"last_checkins":   []map[string]any{},
+			"todays_calendar": []map[string]any{},
+			"open_suggestion": nil,
+		})
+		return
+	}
+	caller := s.callerContext(u)
 	checkins, _ := s.store.RecentCheckins(u.ID, 10)
 	out := []map[string]any{}
 	for _, c := range checkins {
@@ -540,6 +599,7 @@ func (s *Server) toolGetContext(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
+		"caller":          caller,
 		"name":            u.Name,
 		"onboarded":       u.Onboarded(),
 		"interests":       u.Interests,

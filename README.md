@@ -112,6 +112,9 @@ curl -s localhost:8090/healthz
 # latency summary (p50/p95/max per operation) - see LATENCY.md
 curl -s localhost:8090/metrics
 
+# what is actually running here (commit, build time, backend) - drift check, see DEPLOY.md
+curl -s localhost:8090/version
+
 # onboarding page
 curl -s localhost:8090/
 
@@ -164,6 +167,10 @@ curl -s -X POST localhost:8090/forget  -H "$S" -d '{"phone":"+447700900123"}'
 (and also when `TOOL_WEBHOOK_SECRET` is unset, so an unconfigured box is closed by default).
 
 ## Deployment notes for the operator
+
+The deploy flow itself, plus rollback and drift detection, is in [DEPLOY.md](DEPLOY.md).
+The agent prompt contract - what the service tells the voice agent and what it must never
+ask for - is in [docs/VOICE-AGENT.md](docs/VOICE-AGENT.md).
 
 - `runhack-arm64` is a static binary; ship it with nothing else. Templates and `events_live.csv` are embedded.
 - Postgres: set `DATABASE_URL` in the unit's environment **and make sure it is exported to the process** (`EnvironmentFile=` plus the var in the file is enough; a shell-only value is not). Migrations run at boot and are idempotent, so first deploy needs no manual DDL — the role only needs `CREATE` in its own database. Without `DATABASE_URL` the service silently uses SQLite at `DATABASE_PATH`; the boot log line states which backend was chosen. There is no automatic SQLite→Postgres data migration: the first Postgres boot starts empty.

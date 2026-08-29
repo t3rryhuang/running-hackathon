@@ -136,9 +136,20 @@ func (s *Store) CreateUser(u *User) error {
 // MarkPhoneVerified records that the number was proved, and how. It never
 // downgrades an existing verification.
 func (s *Store) MarkPhoneVerified(userID int64, via string) error {
-	_, err := s.exec(`UPDATE users SET phone_verified_at=COALESCE(phone_verified_at, ?), phone_verified_via=? WHERE id=?`,
-		time.Now().UTC(), via, userID)
-	return err
+	if _, err := s.exec(`UPDATE users SET phone_verified_at=COALESCE(phone_verified_at, ?), phone_verified_via=? WHERE id=?`,
+		time.Now().UTC(), via, userID); err != nil {
+		return err
+	}
+	// Calls made before this number signed up were kept unowned. Proving the
+	// number is what makes them this person's, so they are attached now.
+	n, err := s.AdoptTranscripts(userID)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		log.Printf("transcripts: attached %d earlier call(s) to user %d", n, userID)
+	}
+	return nil
 }
 
 // UpsertUser creates the user if the phone is unknown, otherwise updates the

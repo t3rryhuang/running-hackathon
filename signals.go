@@ -294,6 +294,9 @@ func (s *Store) ForgetUser(userID int64) error {
 			`DELETE FROM suggestions WHERE user_id=?`,
 			`DELETE FROM webhook_events WHERE user_id=?`,
 			`DELETE FROM transcripts WHERE user_id=?`,
+			// Including any call still held against the number but never
+			// attached to the profile: forgetting has to mean the number too.
+			`DELETE FROM transcripts WHERE user_id IS NULL AND phone IN (SELECT phone FROM users WHERE id=?)`,
 			`DELETE FROM auth_sessions WHERE user_id=?`,
 			`DELETE FROM auth_audit WHERE user_id=?`,
 			// Login codes are keyed by number rather than by user, so they are

@@ -148,12 +148,12 @@ func TestTranscriptWebhookIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestTranscriptWebhookDropsUnresolvableCalls(t *testing.T) {
+func TestTranscriptWebhookKeepsCallsFromNumbersThatHaveNotSignedUp(t *testing.T) {
 	srv, store := webhookServer(t)
 	known, _ := store.EnsureUser("+447700900004")
 
-	// A number nobody signed up with must not create a profile or be filed
-	// against the one user that does exist.
+	// The call happened, so it is kept - but it belongs to nobody yet, and
+	// certainly not to the one user who does exist.
 	rec := postTranscript(t, srv, "whsec_test", transcriptPayload("conv_stranger", "+447700900999"), time.Now())
 	if rec.Code != http.StatusOK {
 		t.Fatalf("want a fast 200 even when unresolvable, got %d", rec.Code)
@@ -163,6 +163,11 @@ func TestTranscriptWebhookDropsUnresolvableCalls(t *testing.T) {
 	}
 	if _, total, _ := store.Transcripts(known.ID, "", 20, 0); total != 0 {
 		t.Fatalf("stranger's call was filed against a known user")
+	}
+	var held int
+	if err := store.queryRow(`SELECT COUNT(*) FROM transcripts WHERE user_id IS NULL AND phone=?`,
+		"+447700900999").Scan(&held); err != nil || held != 1 {
+		t.Fatalf("call from an unregistered number was thrown away: %d (%v)", held, err)
 	}
 
 	// So must a delivery carrying no number at all.

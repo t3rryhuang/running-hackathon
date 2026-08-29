@@ -141,7 +141,8 @@ deployment.
 `/sms` answers with a canned reply instead of a 500. No Twilio creds → outbound messages are
 logged. No calendar → the model gets an empty calendar block. No ElevenLabs agent/phone id →
 `/call` logs the attempt instead of failing the sign-up. No `ELEVENLABS_WEBHOOK_SECRET` →
-transcript deliveries are rejected rather than trusted.
+transcript deliveries are rejected rather than trusted. No `ELEVENLABS_API_KEY` → transcripts
+arrive by webhook only, with no backfill of calls that predate it.
 
 ## Local development
 
@@ -192,7 +193,7 @@ asserted against the built request, never against the live API.
 | `TWILIO_NUMBER` | yes | Sending number (E.164) |
 | `TWILIO_REGION` | no | Twilio processing region, e.g. `ie1` (Ireland). Default global (`us1`). Needs region-scoped credentials |
 | `TWILIO_EDGE` | no | Edge for the chosen region, e.g. `dublin`. Inferred from `TWILIO_REGION` when omitted |
-| `ELEVENLABS_API_KEY` | yes | Outbound voice calls (`xi-api-key`) |
+| `ELEVENLABS_API_KEY` | yes | Outbound voice calls and the transcript backfill/sync (`xi-api-key`) |
 | `ELEVENLABS_API_BASE` | no | Defaults to `https://api.elevenlabs.io` |
 | `ELEVENLABS_AGENT_ID` | yes | Conversational agent that runs the call |
 | `ELEVENLABS_PHONE_ID` | yes | The agent's Twilio number id in ElevenLabs |
@@ -227,7 +228,10 @@ exported to the process silently means SQLite.
 - Every user-scoped read and write carries `user_id`. Cross-user leakage is covered by
   `isolation_test.go`, which fails if a query forgets its scope.
 - Retried provider webhooks are idempotent: SMS on Twilio's `MessageSid`, transcripts on
-  ElevenLabs' `conversation_id`.
+  ElevenLabs' `conversation_id` — the same key the periodic sync upserts on.
+- `transcripts.user_id` is nullable (migration 10): a call from a number that has not signed
+  up is kept, unattached, alongside the number it came from, and attaches on verification.
+  Erasing an account removes the unattached calls for its number too.
 - There is **no** automatic SQLite→Postgres data migration. The first Postgres boot starts
   empty.
 
@@ -365,7 +369,15 @@ Provider configuration, all operator-side:
   a prompt from asking a question it has already been given the answer to.
 - **Post-call transcripts** — deliver `post_call_transcription` (JSON, no audio) to
   `https://<host>/webhooks/elevenlabs` and export the signing secret as
-  `ELEVENLABS_WEBHOOK_SECRET`.
+  `ELEVENLABS_WEBHOOK_SECRET`. Deliveries are one-shot (retries are off provider-side), so the
+  service does not rely on them alone: at boot and every 10 minutes it reconciles against
+  `GET /v1/convai/conversations` with `ELEVENLABS_API_KEY`, upserting on `conversation_id`.
+  Whichever source sees a call first creates the row; the other updates it. That is what makes
+  every call — inbound or outbound, onboarding or check-in, older than the webhook — appear on
+  the dashboard.
+- A call from a number with no profile is kept unattached (`transcripts.user_id` is nullable)
+  and attaches to the profile when that number is verified. Until then it belongs to nobody,
+  and it is never filed against a guess.
 - Outbound calls go straight to `POST https://api.elevenlabs.io/v1/convai/twilio/outbound-call`
   with `agent_id` / `agent_phone_number_id` / `to_number`; there is no TwiML path.
 
@@ -397,7 +409,7 @@ journalctl -u runhack -f | grep -E 'slow:|outbound-call timing'
 | --- | --- |
 | `/version` says `backend: sqlite` in production | `DATABASE_URL` is in the env file but not exported to the process. Fix the unit, restart, re-check |
 | Inbound SMS 403s | `TWILIO_AUTH_TOKEN` is set and the proxy is not forwarding `Host` / `X-Forwarded-Proto`, so the signature is computed over the wrong URL |
-| Dashboard is empty after a real call | Transcript deliveries are being rejected — usually a missing or wrong `ELEVENLABS_WEBHOOK_SECRET`. `journalctl -u runhack \| grep transcript` |
+| Dashboard is empty after a real call | Check `journalctl -u runhack \| grep -E 'transcript\|elevenlabs webhook'`. Rejected deliveries log the reason and the first bytes of the body; if the sync is also silent, `ELEVENLABS_API_KEY` is missing and only the webhook path is live |
 | `/login` never texts a code | Twilio is unconfigured on that box; the code is generated and has nowhere to go |
 | Agent asks for something already on file | Provider-side prompt, not the service. Re-apply [docs/VOICE-AGENT.md](docs/VOICE-AGENT.md); `/tools/get_context` shows what the agent was actually told |
 | Agent keeps the line open after the interview | `end_call` is not enabled on the agent. The Twilio hang-up backstop fires a few seconds later |

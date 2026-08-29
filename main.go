@@ -46,6 +46,10 @@ func main() {
 
 	stop := make(chan struct{})
 	go NewScheduler(srv, store).Run(stop)
+	// Webhooks only cover calls made after the webhook existed, and only the
+	// ones that got through. The sync reconciles against the provider's own
+	// record so every call ends up on the dashboard.
+	go srv.RunTranscriptSync(NewConversationLister(cfg), stop)
 	// Sensitive signals expire rather than accumulate; the sweeper deletes
 	// them once they are past their retention window.
 	go store.RunRetention(stop)

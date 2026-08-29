@@ -254,6 +254,41 @@ CREATE TABLE IF NOT EXISTS auth_audit (
 		`CREATE INDEX IF NOT EXISTS auth_sessions_user ON auth_sessions (user_id, expires_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS auth_audit_lookup ON auth_audit (phone, created_at DESC)`,
 	}},
+
+	// Every call has to end up on the dashboard, including the ones that
+	// happened before the number signed up. A transcript therefore carries the
+	// number it belongs to and may sit without an owner until that number
+	// verifies, at which point it is adopted. The table is rebuilt rather than
+	// altered because SQLite cannot drop a NOT NULL in place, and `source`
+	// records whether the row arrived by webhook or by the provider sync.
+	{Version: 10, Name: "unowned_transcripts", SQL: []string{`
+CREATE TABLE transcripts_v2 (
+	id {{pk}},
+	user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+	phone {{text}} NOT NULL DEFAULT '',
+	conversation_id {{text}} NOT NULL,
+	call_sid {{text}} NOT NULL DEFAULT '',
+	direction {{text}} NOT NULL DEFAULT 'outbound',
+	status {{text}} NOT NULL DEFAULT '',
+	source {{text}} NOT NULL DEFAULT 'webhook',
+	summary {{text}} NOT NULL DEFAULT '',
+	body {{text}} NOT NULL DEFAULT '',
+	turns INTEGER NOT NULL DEFAULT 0,
+	duration_seconds INTEGER NOT NULL DEFAULT 0,
+	started_at {{ts}} NOT NULL,
+	received_at {{ts}} NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`, `
+INSERT INTO transcripts_v2
+	(user_id, phone, conversation_id, call_sid, direction, status, summary, body, turns, duration_seconds, started_at, received_at)
+SELECT t.user_id, COALESCE(u.phone, ''), t.conversation_id, t.call_sid, t.direction, t.status,
+	t.summary, t.body, t.turns, t.duration_seconds, t.started_at, t.received_at
+FROM transcripts t LEFT JOIN users u ON u.id = t.user_id`,
+		`DROP TABLE transcripts`,
+		`ALTER TABLE transcripts_v2 RENAME TO transcripts`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS transcripts_conversation ON transcripts (conversation_id)`,
+		`CREATE INDEX IF NOT EXISTS transcripts_user ON transcripts (user_id, started_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS transcripts_phone ON transcripts (phone, started_at DESC)`,
+	}},
 }
 
 // Store is the persistence layer. Every user-scoped query takes a user id and

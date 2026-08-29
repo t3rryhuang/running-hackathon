@@ -20,18 +20,25 @@ import (
 // rules as the rest of the profile: one owner, resolved from the number that
 // was dialled, and never shown to anybody else.
 type Transcript struct {
-	ID             int64
+	ID int64
+	// UserID is zero while the call belongs to a number that has not signed up
+	// yet. The row is kept anyway and adopted when that number verifies, so a
+	// call placed before onboarding is not lost.
 	UserID         int64
+	Phone          string
 	ConversationID string
 	CallSID        string
 	Direction      string
 	Status         string
-	Summary        string
-	Body           string
-	Turns          int
-	Duration       time.Duration
-	StartedAt      time.Time
-	ReceivedAt     time.Time
+	// Source is how the row arrived: the provider's webhook, or the sync that
+	// reads the provider's own list of conversations.
+	Source     string
+	Summary    string
+	Body       string
+	Turns      int
+	Duration   time.Duration
+	StartedAt  time.Time
+	ReceivedAt time.Time
 }
 
 // transcriptRetention is how long a call transcript is kept before the
@@ -46,9 +53,11 @@ const elevenLabsSignatureTolerance = 30 * time.Minute
 
 // SaveTranscript writes a delivered transcript, keyed on the provider's
 // conversation id so a retried delivery overwrites rather than duplicates.
+// Whichever of the webhook and the sync arrives first creates the row and the
+// other updates it, so the two paths can never produce two copies of one call.
 func (s *Store) SaveTranscript(t *Transcript) error {
-	if t.UserID == 0 {
-		return errors.New("transcript needs an owner")
+	if t.UserID == 0 && strings.TrimSpace(t.Phone) == "" {
+		return errors.New("transcript needs an owner or a number")
 	}
 	if strings.TrimSpace(t.ConversationID) == "" {
 		return errors.New("transcript needs a conversation id")
@@ -56,11 +65,18 @@ func (s *Store) SaveTranscript(t *Transcript) error {
 	if t.StartedAt.IsZero() {
 		t.StartedAt = time.Now().UTC()
 	}
+	if t.Source == "" {
+		t.Source = transcriptFromWebhook
+	}
+	owner := nullableID(t.UserID)
 	return s.tx(func(tx *sql.Tx) error {
+		// COALESCE on the owner keeps an already-adopted row attached: a later
+		// delivery for a number that has since signed up must not orphan it.
 		res, err := s.txExec(tx, `UPDATE transcripts
-			SET user_id=?, call_sid=?, direction=?, status=?, summary=?, body=?, turns=?, duration_seconds=?, started_at=?, received_at=?
+			SET user_id=COALESCE(?, user_id), phone=?, call_sid=?, direction=?, status=?, source=?,
+				summary=?, body=?, turns=?, duration_seconds=?, started_at=?, received_at=?
 			WHERE conversation_id=?`,
-			t.UserID, t.CallSID, t.Direction, t.Status, t.Summary, t.Body, t.Turns,
+			owner, t.Phone, t.CallSID, t.Direction, t.Status, t.Source, t.Summary, t.Body, t.Turns,
 			int64(t.Duration.Seconds()), t.StartedAt.UTC(), time.Now().UTC(), t.ConversationID)
 		if err != nil {
 			return err
@@ -69,9 +85,9 @@ func (s *Store) SaveTranscript(t *Transcript) error {
 			return nil
 		}
 		id, err := s.txInsert(tx, `INSERT INTO transcripts
-			(user_id, conversation_id, call_sid, direction, status, summary, body, turns, duration_seconds, started_at, received_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-			t.UserID, t.ConversationID, t.CallSID, t.Direction, t.Status, t.Summary, t.Body, t.Turns,
+			(user_id, phone, conversation_id, call_sid, direction, status, source, summary, body, turns, duration_seconds, started_at, received_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			owner, t.Phone, t.ConversationID, t.CallSID, t.Direction, t.Status, t.Source, t.Summary, t.Body, t.Turns,
 			int64(t.Duration.Seconds()), t.StartedAt.UTC(), time.Now().UTC())
 		if err != nil {
 			return err
@@ -81,16 +97,44 @@ func (s *Store) SaveTranscript(t *Transcript) error {
 	})
 }
 
+// nullableID renders "nobody owns this yet" as SQL NULL rather than user 0,
+// which no foreign key would accept.
+func nullableID(id int64) any {
+	if id == 0 {
+		return nil
+	}
+	return id
+}
+
+// AdoptTranscripts attaches the calls already held for a number to the profile
+// that has just proved it owns that number.
+func (s *Store) AdoptTranscripts(userID int64) (int64, error) {
+	res, err := s.exec(`UPDATE transcripts SET user_id=?
+		WHERE user_id IS NULL AND phone = (SELECT phone FROM users WHERE id=?)`, userID, userID)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func scanTranscript(rows interface{ Scan(...any) error }) (Transcript, error) {
 	var t Transcript
 	var secs int64
-	err := rows.Scan(&t.ID, &t.UserID, &t.ConversationID, &t.CallSID, &t.Direction, &t.Status,
-		&t.Summary, &t.Body, &t.Turns, &secs, &t.StartedAt, &t.ReceivedAt)
+	var owner sql.NullInt64
+	err := rows.Scan(&t.ID, &owner, &t.Phone, &t.ConversationID, &t.CallSID, &t.Direction, &t.Status,
+		&t.Source, &t.Summary, &t.Body, &t.Turns, &secs, &t.StartedAt, &t.ReceivedAt)
+	t.UserID = owner.Int64
 	t.Duration = time.Duration(secs) * time.Second
 	return t, err
 }
 
-const transcriptColumns = `id, user_id, conversation_id, call_sid, direction, status, summary, body, turns, duration_seconds, started_at, received_at`
+const transcriptColumns = `id, user_id, phone, conversation_id, call_sid, direction, status, source, summary, body, turns, duration_seconds, started_at, received_at`
+
+// transcriptOwned matches every call that belongs to one profile: the ones
+// already attached to it, and the ones held against its verified number from
+// before it signed up. The number comes from the users table, never from the
+// browser, so this cannot reach across accounts.
+const transcriptOwned = `(user_id=? OR (user_id IS NULL AND phone <> '' AND phone = (SELECT phone FROM users WHERE id=?)))`
 
 // Transcripts lists one user's calls, newest first. query filters on the
 // summary and the transcript body; limit and offset paginate. Every query is
@@ -102,8 +146,8 @@ func (s *Store) Transcripts(userID int64, query string, limit, offset int) ([]Tr
 	if offset < 0 {
 		offset = 0
 	}
-	where := `WHERE user_id=?`
-	args := []any{userID}
+	where := `WHERE ` + transcriptOwned
+	args := []any{userID, userID}
 	if q := strings.TrimSpace(query); q != "" {
 		where += ` AND (LOWER(body) LIKE ? OR LOWER(summary) LIKE ?)`
 		like := "%" + strings.ToLower(q) + "%"
@@ -135,7 +179,7 @@ func (s *Store) Transcripts(userID int64, query string, limit, offset int) ([]Tr
 // else: an id from another account is indistinguishable from an id that does
 // not exist.
 func (s *Store) Transcript(userID, id int64) (*Transcript, error) {
-	row := s.queryRow(`SELECT `+transcriptColumns+` FROM transcripts WHERE id=? AND user_id=?`, id, userID)
+	row := s.queryRow(`SELECT `+transcriptColumns+` FROM transcripts WHERE id=? AND `+transcriptOwned, id, userID, userID)
 	t, err := scanTranscript(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -148,7 +192,7 @@ func (s *Store) Transcript(userID, id int64) (*Transcript, error) {
 
 // DeleteTranscript removes one call for its owner.
 func (s *Store) DeleteTranscript(userID, id int64) (bool, error) {
-	res, err := s.exec(`DELETE FROM transcripts WHERE id=? AND user_id=?`, id, userID)
+	res, err := s.exec(`DELETE FROM transcripts WHERE id=? AND `+transcriptOwned, id, userID, userID)
 	if err != nil {
 		return false, err
 	}
@@ -165,49 +209,61 @@ func (s *Store) PurgeExpiredTranscripts(now time.Time) (int64, error) {
 	return res.RowsAffected()
 }
 
-// The subset of the post_call_transcription payload this service reads.
+// elevenLabsConversation is the subset of a conversation this service reads.
+// The webhook wraps it in an envelope and the provider's own conversation API
+// returns it bare, so both paths decode into this one shape.
+type elevenLabsConversation struct {
+	ConversationID string `json:"conversation_id"`
+	Status         string `json:"status"`
+	Transcript     []struct {
+		Role    string  `json:"role"`
+		Message string  `json:"message"`
+		AtSecs  float64 `json:"time_in_call_secs"`
+	} `json:"transcript"`
+	Metadata struct {
+		StartUnix   int64 `json:"start_time_unix_secs"`
+		DurationSec int64 `json:"call_duration_secs"`
+		PhoneCall   struct {
+			Direction      string `json:"direction"`
+			ExternalNumber string `json:"external_number"`
+			CallSID        string `json:"call_sid"`
+		} `json:"phone_call"`
+	} `json:"metadata"`
+	Analysis struct {
+		Summary string `json:"transcript_summary"`
+	} `json:"analysis"`
+	ClientData struct {
+		// Dynamic variables are not all strings: the provider mixes in its own
+		// numeric and boolean system variables. Decoding them as strings threw
+		// the whole delivery away, transcript and all, so they are read loosely
+		// and converted only for the one key this service looks at.
+		DynamicVariables map[string]any `json:"dynamic_variables"`
+	} `json:"conversation_initiation_client_data"`
+}
+
+// The post_call_transcription envelope.
 type elevenLabsWebhook struct {
-	Type string `json:"type"`
-	Data struct {
-		ConversationID string `json:"conversation_id"`
-		Status         string `json:"status"`
-		Transcript     []struct {
-			Role    string  `json:"role"`
-			Message string  `json:"message"`
-			AtSecs  float64 `json:"time_in_call_secs"`
-		} `json:"transcript"`
-		Metadata struct {
-			StartUnix   int64 `json:"start_time_unix_secs"`
-			DurationSec int64 `json:"call_duration_secs"`
-			PhoneCall   struct {
-				Direction      string `json:"direction"`
-				ExternalNumber string `json:"external_number"`
-				CallSID        string `json:"call_sid"`
-			} `json:"phone_call"`
-		} `json:"metadata"`
-		Analysis struct {
-			Summary string `json:"transcript_summary"`
-		} `json:"analysis"`
-		ClientData struct {
-			DynamicVariables map[string]string `json:"dynamic_variables"`
-		} `json:"conversation_initiation_client_data"`
-	} `json:"data"`
+	Type string                 `json:"type"`
+	Data elevenLabsConversation `json:"data"`
 }
 
 // phone is the number the call was placed to. The dynamic variables are only a
 // fallback: they are whatever this service sent when it dialled, so they are
 // as trustworthy as the call record itself, but the provider's own view of the
 // external number is preferred.
-func (w elevenLabsWebhook) phone() string {
-	if n := strings.TrimSpace(w.Data.Metadata.PhoneCall.ExternalNumber); n != "" {
+func (w elevenLabsConversation) phone() string {
+	if n := strings.TrimSpace(w.Metadata.PhoneCall.ExternalNumber); n != "" {
 		return n
 	}
-	return strings.TrimSpace(w.Data.ClientData.DynamicVariables["user_phone"])
+	if v, ok := w.ClientData.DynamicVariables["user_phone"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
 }
 
-func (w elevenLabsWebhook) transcript() (body string, turns int) {
+func (w elevenLabsConversation) transcript() (body string, turns int) {
 	var b strings.Builder
-	for _, line := range w.Data.Transcript {
+	for _, line := range w.Transcript {
 		msg := strings.TrimSpace(line.Message)
 		if msg == "" {
 			continue
@@ -279,18 +335,26 @@ func (s *Server) handleElevenLabsWebhook(w http.ResponseWriter, r *http.Request)
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
 	if err != nil {
-		http.Error(w, "unreadable body", http.StatusBadRequest)
+		rejectDelivery(w, http.StatusBadRequest, "unreadable body", err.Error(), nil)
 		return
 	}
 	if err := verifyElevenLabsSignature(s.cfg.ElevenLabsSecret, r.Header.Get("elevenlabs-signature"), body, time.Now()); err != nil {
-		log.Printf("elevenlabs webhook: rejected: %v", err)
-		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		rejectDelivery(w, http.StatusUnauthorized, "invalid signature", err.Error(), body)
 		return
 	}
 	var payload elevenLabsWebhook
 	if err := json.Unmarshal(body, &payload); err != nil {
-		http.Error(w, "invalid json", http.StatusBadRequest)
+		rejectDelivery(w, http.StatusBadRequest, "invalid json", err.Error(), body)
 		return
+	}
+	if payload.Type == "" && payload.Data.ConversationID == "" {
+		// Some deliveries arrive as the conversation itself rather than the
+		// envelope. It is signed with our secret and it is a call, so it is
+		// filed rather than argued with.
+		var bare elevenLabsConversation
+		if err := json.Unmarshal(body, &bare); err == nil && bare.ConversationID != "" {
+			payload.Type, payload.Data = "post_call_transcription", bare
+		}
 	}
 	if payload.Type != "post_call_transcription" {
 		// Authentic, but not an event this service handles. Accepting it stops
@@ -299,48 +363,76 @@ func (s *Server) handleElevenLabsWebhook(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if payload.Data.ConversationID == "" {
-		http.Error(w, "missing conversation id", http.StatusBadRequest)
+		rejectDelivery(w, http.StatusBadRequest, "missing conversation id", "", body)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"accepted": true})
 	s.async.Add(1)
 	go func() {
 		defer s.async.Done()
-		s.storeTranscript(payload)
+		s.storeConversation(payload.Data, transcriptFromWebhook)
 	}()
 }
 
-func (s *Server) storeTranscript(payload elevenLabsWebhook) {
-	phone := normalisePhone(payload.phone())
+// deliveryPeekBytes is how much of a rejected body is logged. Retries are
+// disabled provider-side, so a refusal is final and has to be diagnosable
+// afterwards; the envelope head carries the type and the ids, and stops well
+// short of the conversation itself.
+const deliveryPeekBytes = 220
+
+// rejectDelivery answers the provider and records why, because a delivery this
+// service turns away is a call that will never appear on anybody's dashboard.
+func rejectDelivery(w http.ResponseWriter, status int, reason, detail string, body []byte) {
+	peek := body
+	if len(peek) > deliveryPeekBytes {
+		peek = peek[:deliveryPeekBytes]
+	}
+	log.Printf("elevenlabs webhook: rejected %d %s (%s), %d bytes, head: %s",
+		status, reason, detail, len(body), strconv.Quote(string(peek)))
+	metrics.RecordErr("http.transcript", reason)
+	http.Error(w, reason, status)
+}
+
+// How a stored transcript reached us.
+const (
+	transcriptFromWebhook = "webhook"
+	transcriptFromSync    = "sync"
+)
+
+// storeConversation files one call. A number nobody has signed up with is kept
+// unowned rather than dropped: the call happened, and it is handed to that
+// profile the moment the number verifies. Lookup never creates a profile — a
+// transcript is not consent to sign somebody up.
+func (s *Server) storeConversation(conv elevenLabsConversation, source string) {
+	phone := normalisePhone(conv.phone())
 	if !e164.MatchString(phone) {
-		log.Printf("elevenlabs webhook: %s has no usable number, dropped", payload.Data.ConversationID)
+		log.Printf("elevenlabs %s: %s has no usable number, dropped", source, conv.ConversationID)
 		return
 	}
-	// Lookup, never create: a transcript is not proof that somebody signed up,
-	// and inventing a profile from one would file the call against a stranger.
-	u, err := s.store.UserByPhone(phone)
-	if err != nil || u == nil {
-		log.Printf("elevenlabs webhook: %s matches no user, dropped", payload.Data.ConversationID)
-		return
+	var ownerID int64
+	if u, err := s.store.UserByPhone(phone); err == nil && u != nil {
+		ownerID = u.ID
 	}
-	body, turns := payload.transcript()
+	body, turns := conv.transcript()
 	started := time.Now().UTC()
-	if payload.Data.Metadata.StartUnix > 0 {
-		started = time.Unix(payload.Data.Metadata.StartUnix, 0).UTC()
+	if conv.Metadata.StartUnix > 0 {
+		started = time.Unix(conv.Metadata.StartUnix, 0).UTC()
 	}
 	t := &Transcript{
-		UserID:         u.ID,
-		ConversationID: payload.Data.ConversationID,
-		CallSID:        payload.Data.Metadata.PhoneCall.CallSID,
-		Direction:      payload.Data.Metadata.PhoneCall.Direction,
-		Status:         payload.Data.Status,
-		Summary:        strings.TrimSpace(payload.Data.Analysis.Summary),
+		UserID:         ownerID,
+		Phone:          phone,
+		ConversationID: conv.ConversationID,
+		CallSID:        conv.Metadata.PhoneCall.CallSID,
+		Direction:      conv.Metadata.PhoneCall.Direction,
+		Status:         conv.Status,
+		Source:         source,
+		Summary:        strings.TrimSpace(conv.Analysis.Summary),
 		Body:           body,
 		Turns:          turns,
-		Duration:       time.Duration(payload.Data.Metadata.DurationSec) * time.Second,
+		Duration:       time.Duration(conv.Metadata.DurationSec) * time.Second,
 		StartedAt:      started,
 	}
 	if err := s.store.SaveTranscript(t); err != nil {
-		log.Printf("elevenlabs webhook: saving %s: %v", payload.Data.ConversationID, err)
+		log.Printf("elevenlabs %s: saving %s: %v", source, conv.ConversationID, err)
 	}
 }

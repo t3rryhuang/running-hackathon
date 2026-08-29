@@ -58,7 +58,13 @@ Environment handling:
 - `ELEVENLABS_WEBHOOK_SECRET` must be exported too. Post-call transcript
   deliveries to `/webhooks/elevenlabs` are rejected without it, silently as far
   as the dashboard is concerned — it will simply show no calls. Check with
-  `journalctl -u runhack | grep transcript`.
+  `journalctl -u runhack | grep transcript`. Rejections now log a reason and the
+  first 220 bytes of the body, so a refused delivery is diagnosable.
+- `ELEVENLABS_API_KEY` does double duty: outbound calls, and the transcript
+  backfill that runs at boot and every 10 minutes against
+  `GET /v1/convai/conversations`. Without it the dashboard only ever shows calls
+  whose webhook delivery arrived; with it, calls that predate the webhook (or
+  whose delivery was lost — provider retries are off) are reconciled in.
 - Sign-in codes go out over Twilio, so `/login` only works on a box where
   Twilio is configured. Without it a code is generated and never delivered.
 - Secrets live only in `/opt/runhack/.env` (operator-owned, mode 600). Nothing

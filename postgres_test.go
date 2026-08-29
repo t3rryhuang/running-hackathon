@@ -127,12 +127,30 @@ func TestPostgresBackend(t *testing.T) {
 		t.Fatalf("transcript search on postgres: %d rows (%v)", total, err)
 	}
 
+	// A call from a number with no profile is kept unattached (nullable owner)
+	// and attaches on verification - the whole point of migration 10.
+	if err := store.SaveTranscript(&Transcript{
+		Phone: phone, ConversationID: "conv_pg_unowned_" + phone, Summary: "before signup",
+		Body: "an earlier call", StartedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("save unowned transcript: %v", err)
+	}
+	if n, err := store.AdoptTranscripts(u.ID); err != nil || n != 1 {
+		t.Fatalf("adopting earlier calls on postgres: %d (%v)", n, err)
+	}
+	if _, total, err := store.Transcripts(u.ID, "", 10, 0); err != nil || total != 2 {
+		t.Fatalf("adopted call missing from the dashboard list: %d (%v)", total, err)
+	}
+
 	code, err := store.IssueLoginCode(phone, time.Now())
 	if err != nil {
 		t.Fatalf("issue code: %v", err)
 	}
 	if err := store.ConsumeLoginCode(phone, code, time.Now()); err != nil {
 		t.Fatalf("consume code: %v", err)
+	}
+	if err := store.MarkPhoneVerified(u.ID, "otp"); err != nil {
+		t.Fatalf("verify: %v", err)
 	}
 	token, err := store.StartAuthSession(u.ID, time.Now())
 	if err != nil {

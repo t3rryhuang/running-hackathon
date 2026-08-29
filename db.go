@@ -6,79 +6,32 @@ import (
 	"log"
 	"strings"
 	"time"
-
-	_ "modernc.org/sqlite"
 )
 
-const schema = `
-CREATE TABLE IF NOT EXISTS users (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	phone TEXT UNIQUE NOT NULL,
-	name TEXT NOT NULL DEFAULT '',
-	channel TEXT NOT NULL DEFAULT 'sms' CHECK (channel IN ('call','sms')),
-	frequency TEXT NOT NULL DEFAULT 'daily',
-	ics_url TEXT,
-	interests TEXT NOT NULL DEFAULT '',
-	onboarded_at DATETIME,
-	last_call_sid TEXT,
-	last_triggered_at DATETIME,
-	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE TABLE IF NOT EXISTS checkins (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	user_id INTEGER NOT NULL REFERENCES users(id),
-	mood INTEGER CHECK (mood IS NULL OR (mood BETWEEN 1 AND 5)),
-	summary TEXT NOT NULL DEFAULT '',
-	topics TEXT NOT NULL DEFAULT '',
-	raw TEXT NOT NULL DEFAULT '',
-	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE TABLE IF NOT EXISTS events (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	title TEXT NOT NULL,
-	starts_at DATETIME NOT NULL,
-	city TEXT NOT NULL DEFAULT 'London',
-	url TEXT NOT NULL DEFAULT '',
-	tags TEXT NOT NULL DEFAULT ''
-);
-CREATE TABLE IF NOT EXISTS suggestions (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	user_id INTEGER NOT NULL REFERENCES users(id),
-	event_id INTEGER NOT NULL REFERENCES events(id),
-	status TEXT NOT NULL CHECK (status IN ('offered','accepted','declined')),
-	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE TABLE IF NOT EXISTS messages (
-	id INTEGER PRIMARY KEY AUTOINCREMENT,
-	user_id INTEGER NOT NULL REFERENCES users(id),
-	role TEXT NOT NULL,
-	body TEXT NOT NULL,
-	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE UNIQUE INDEX IF NOT EXISTS events_unique ON events (title, starts_at);
-`
-
-// migrations are applied after the schema so databases created by earlier
-// versions gain new columns instead of needing a wipe.
-var migrations = []string{
-	`ALTER TABLE users ADD COLUMN interests TEXT NOT NULL DEFAULT ''`,
-	`ALTER TABLE users ADD COLUMN onboarded_at DATETIME`,
-	`ALTER TABLE users ADD COLUMN last_call_sid TEXT`,
-}
-
 type User struct {
-	ID              int64
-	Phone           string
-	Name            string
-	Channel         string
-	Frequency       string
-	ICSURL          string
-	Interests       string
-	OnboardedAt     *time.Time
-	LastCallSID     string
-	LastTriggeredAt *time.Time
-	CreatedAt       time.Time
+	ID               int64
+	Phone            string
+	Name             string
+	Channel          string
+	Frequency        string
+	ICSURL           string
+	Interests        string
+	OnboardedAt      *time.Time
+	LastCallSID      string
+	LastTriggeredAt  *time.Time
+	PhoneVerifiedAt  *time.Time
+	PhoneVerifiedVia string
+	CreatedAt        time.Time
 }
+
+// PhoneVerified reports whether something proved this person holds the number:
+// an inbound Twilio SMS with a valid signature, or a tool webhook raised during
+// a call the service itself placed to that number.
+func (u *User) PhoneVerified() bool { return u.PhoneVerifiedAt != nil }
+
+// DisplayName is the only way a name reaches a prompt or a message. It is empty
+// until the person tells us their name, and it is never an identifier.
+func (u *User) DisplayName() string { return strings.TrimSpace(u.Name) }
 
 // Onboarded reports whether the voice agent has already interviewed this user.
 func (u *User) Onboarded() bool { return u.OnboardedAt != nil }
@@ -133,41 +86,20 @@ type Suggestion struct {
 	Event     Event
 }
 
-type Store struct{ db *sql.DB }
-
-func OpenStore(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
-	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema); err != nil {
-		return nil, err
-	}
-	for _, m := range migrations {
-		// Re-running an applied migration errors with "duplicate column";
-		// that is the expected steady state, so it is not fatal.
-		if _, err := db.Exec(m); err != nil && !strings.Contains(err.Error(), "duplicate column") {
-			return nil, err
-		}
-	}
-	return &Store{db: db}, nil
-}
-
-func (s *Store) Close() error { return s.db.Close() }
-
-const userSelect = `SELECT id, phone, name, channel, frequency, COALESCE(ics_url,''), COALESCE(interests,''), onboarded_at, COALESCE(last_call_sid,''), last_triggered_at, created_at FROM users`
+const userSelect = `SELECT id, phone, name, channel, frequency, COALESCE(ics_url,''), COALESCE(interests,''), onboarded_at, COALESCE(last_call_sid,''), last_triggered_at, phone_verified_at, COALESCE(phone_verified_via,''), created_at FROM users`
 
 type scanner interface{ Scan(dest ...any) error }
 
+// UserByPhone is the only lookup that resolves a person. There is deliberately
+// no lookup by name: two people can share a name, nobody shares a number.
 func (s *Store) UserByPhone(phone string) (*User, error) {
-	return scanUser(s.db.QueryRow(userSelect+` WHERE phone = ?`, phone))
+	return scanUser(s.queryRow(userSelect+` WHERE phone = ?`, phone))
 }
 
 func scanUser(row scanner) (*User, error) {
 	var u User
-	var onboarded, last sql.NullTime
-	if err := row.Scan(&u.ID, &u.Phone, &u.Name, &u.Channel, &u.Frequency, &u.ICSURL, &u.Interests, &onboarded, &u.LastCallSID, &last, &u.CreatedAt); err != nil {
+	var onboarded, last, verified sql.NullTime
+	if err := row.Scan(&u.ID, &u.Phone, &u.Name, &u.Channel, &u.Frequency, &u.ICSURL, &u.Interests, &onboarded, &u.LastCallSID, &last, &verified, &u.PhoneVerifiedVia, &u.CreatedAt); err != nil {
 		return nil, err
 	}
 	if onboarded.Valid {
@@ -178,17 +110,29 @@ func scanUser(row scanner) (*User, error) {
 		t := last.Time
 		u.LastTriggeredAt = &t
 	}
+	if verified.Valid {
+		t := verified.Time
+		u.PhoneVerifiedAt = &t
+	}
 	return &u, nil
 }
 
 func (s *Store) CreateUser(u *User) error {
-	res, err := s.db.Exec(`INSERT INTO users (phone, name, channel, frequency, ics_url, interests) VALUES (?,?,?,?,?,?)`,
+	id, err := s.insert(`INSERT INTO users (phone, name, channel, frequency, ics_url, interests) VALUES (?,?,?,?,?,?)`,
 		u.Phone, u.Name, u.Channel, u.Frequency, nullStr(u.ICSURL), u.Interests)
 	if err != nil {
 		return err
 	}
-	u.ID, _ = res.LastInsertId()
+	u.ID = id
 	return nil
+}
+
+// MarkPhoneVerified records that the number was proved, and how. It never
+// downgrades an existing verification.
+func (s *Store) MarkPhoneVerified(userID int64, via string) error {
+	_, err := s.exec(`UPDATE users SET phone_verified_at=COALESCE(phone_verified_at, ?), phone_verified_via=? WHERE id=?`,
+		time.Now().UTC(), via, userID)
+	return err
 }
 
 // UpsertUser creates the user if the phone is unknown, otherwise updates the
@@ -201,7 +145,7 @@ func (s *Store) UpsertUser(u *User) error {
 		if strings.TrimSpace(u.Interests) == "" {
 			u.Interests = existing.Interests
 		}
-		_, err = s.db.Exec(`UPDATE users SET name=?, channel=?, frequency=?, ics_url=?, interests=? WHERE id=?`,
+		_, err = s.exec(`UPDATE users SET name=?, channel=?, frequency=?, ics_url=?, interests=? WHERE id=?`,
 			u.Name, u.Channel, u.Frequency, nullStr(u.ICSURL), u.Interests, existing.ID)
 		u.ID = existing.ID
 		return err
@@ -230,7 +174,7 @@ func (s *Store) EnsureUser(phone string) (*User, error) {
 }
 
 func (s *Store) AllUsers() ([]User, error) {
-	rows, err := s.db.Query(userSelect + ` ORDER BY id`)
+	rows, err := s.query(userSelect + ` ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +204,7 @@ func (s *Store) SaveOnboarding(u *User, name, interests, frequency string) error
 	}
 	now := time.Now().UTC()
 	u.OnboardedAt = &now
-	_, err := s.db.Exec(`UPDATE users SET name=?, interests=?, frequency=?, onboarded_at=? WHERE id=?`,
+	_, err := s.exec(`UPDATE users SET name=?, interests=?, frequency=?, onboarded_at=? WHERE id=?`,
 		u.Name, u.Interests, u.Frequency, now, u.ID)
 	return err
 }
@@ -268,12 +212,12 @@ func (s *Store) SaveOnboarding(u *User, name, interests, frequency string) error
 // SetCallSID remembers the Twilio call behind the current voice conversation so
 // the service can hang it up once onboarding is done.
 func (s *Store) SetCallSID(userID int64, sid string) error {
-	_, err := s.db.Exec(`UPDATE users SET last_call_sid=? WHERE id=?`, nullStr(sid), userID)
+	_, err := s.exec(`UPDATE users SET last_call_sid=? WHERE id=?`, nullStr(sid), userID)
 	return err
 }
 
 func (s *Store) SetFrequency(userID int64, frequency string) error {
-	_, err := s.db.Exec(`UPDATE users SET frequency=? WHERE id=?`, frequency, userID)
+	_, err := s.exec(`UPDATE users SET frequency=? WHERE id=?`, frequency, userID)
 	return err
 }
 
@@ -286,22 +230,25 @@ func validFrequency(f string) bool {
 }
 
 func (s *Store) MarkTriggered(userID int64, at time.Time) error {
-	_, err := s.db.Exec(`UPDATE users SET last_triggered_at=? WHERE id=?`, at.UTC(), userID)
+	_, err := s.exec(`UPDATE users SET last_triggered_at=? WHERE id=?`, at.UTC(), userID)
 	return err
 }
 
 func (s *Store) AddCheckin(c *Checkin) error {
-	res, err := s.db.Exec(`INSERT INTO checkins (user_id, mood, summary, topics, raw) VALUES (?,?,?,?,?)`,
+	if c.UserID == 0 {
+		return errors.New("check-in needs a user")
+	}
+	id, err := s.insert(`INSERT INTO checkins (user_id, mood, summary, topics, raw) VALUES (?,?,?,?,?)`,
 		c.UserID, c.Mood, c.Summary, c.Topics, c.Raw)
 	if err != nil {
 		return err
 	}
-	c.ID, _ = res.LastInsertId()
+	c.ID = id
 	return nil
 }
 
 func (s *Store) RecentCheckins(userID int64, limit int) ([]Checkin, error) {
-	rows, err := s.db.Query(`SELECT id, user_id, mood, summary, topics, raw, created_at FROM checkins WHERE user_id=? ORDER BY id DESC LIMIT ?`, userID, limit)
+	rows, err := s.query(`SELECT id, user_id, mood, summary, topics, raw, created_at FROM checkins WHERE user_id=? ORDER BY id DESC LIMIT ?`, userID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -323,7 +270,7 @@ func (s *Store) RecentCheckins(userID int64, limit int) ([]Checkin, error) {
 }
 
 func (s *Store) AddMessage(userID int64, role, body string) error {
-	_, err := s.db.Exec(`INSERT INTO messages (user_id, role, body) VALUES (?,?,?)`, userID, role, body)
+	_, err := s.exec(`INSERT INTO messages (user_id, role, body) VALUES (?,?,?)`, userID, role, body)
 	return err
 }
 
@@ -335,7 +282,7 @@ type Message struct {
 // RecentMessages returns the last n messages oldest-first, which is the order the
 // Anthropic Messages API expects.
 func (s *Store) RecentMessages(userID int64, limit int) ([]Message, error) {
-	rows, err := s.db.Query(`SELECT role, body FROM (SELECT id, role, body FROM messages WHERE user_id=? ORDER BY id DESC LIMIT ?) ORDER BY id ASC`, userID, limit)
+	rows, err := s.query(`SELECT role, body FROM (SELECT id, role, body FROM messages WHERE user_id=? ORDER BY id DESC LIMIT ?) recent ORDER BY id ASC`, userID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -355,7 +302,7 @@ func (s *Store) RecentMessages(userID int64, limit int) ([]Message, error) {
 // Relevance is decided in matching.go rather than in SQL, so every suggestion
 // (and every exclusion) can explain itself.
 func (s *Store) CandidateEvents(userID int64, limit int) ([]Event, error) {
-	rows, err := s.db.Query(`SELECT id, title, starts_at, city, url, tags FROM events
+	rows, err := s.query(`SELECT id, title, starts_at, city, url, tags FROM events
 		WHERE starts_at >= ? AND id NOT IN (SELECT event_id FROM suggestions WHERE user_id=?)
 		ORDER BY starts_at ASC LIMIT ?`, time.Now().UTC(), userID, limit)
 	if err != nil {
@@ -382,16 +329,12 @@ func scanEvent(row scanner) (*Event, error) {
 }
 
 func (s *Store) AddSuggestion(userID, eventID int64) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO suggestions (user_id, event_id, status) VALUES (?,?, 'offered')`, userID, eventID)
-	if err != nil {
-		return 0, err
-	}
-	return res.LastInsertId()
+	return s.insert(`INSERT INTO suggestions (user_id, event_id, status) VALUES (?,?, 'offered')`, userID, eventID)
 }
 
 // OpenSuggestion returns the most recent still-offered suggestion for a user.
 func (s *Store) OpenSuggestion(userID int64) (*Suggestion, error) {
-	row := s.db.QueryRow(`SELECT s.id, s.user_id, s.event_id, s.status, s.created_at, e.id, e.title, e.starts_at, e.city, e.url, e.tags
+	row := s.queryRow(`SELECT s.id, s.user_id, s.event_id, s.status, s.created_at, e.id, e.title, e.starts_at, e.city, e.url, e.tags
 		FROM suggestions s JOIN events e ON e.id = s.event_id
 		WHERE s.user_id=? AND s.status='offered' ORDER BY s.id DESC LIMIT 1`, userID)
 	var sg Suggestion
@@ -403,13 +346,21 @@ func (s *Store) OpenSuggestion(userID int64) (*Suggestion, error) {
 	return &sg, nil
 }
 
-func (s *Store) SetSuggestionStatus(id int64, status string) error {
-	_, err := s.db.Exec(`UPDATE suggestions SET status=? WHERE id=?`, status, id)
-	return err
+// SetSuggestionStatus is tenant-scoped: a suggestion id alone is not enough to
+// mutate it, the caller must also own it.
+func (s *Store) SetSuggestionStatus(userID, id int64, status string) error {
+	res, err := s.exec(`UPDATE suggestions SET status=? WHERE id=? AND user_id=?`, status, id, userID)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (s *Store) AcceptedSuggestions(userID int64) ([]Suggestion, error) {
-	rows, err := s.db.Query(`SELECT s.id, s.user_id, s.event_id, s.status, s.created_at, e.id, e.title, e.starts_at, e.city, e.url, e.tags
+	rows, err := s.query(`SELECT s.id, s.user_id, s.event_id, s.status, s.created_at, e.id, e.title, e.starts_at, e.city, e.url, e.tags
 		FROM suggestions s JOIN events e ON e.id = s.event_id
 		WHERE s.user_id=? AND s.status='accepted' ORDER BY e.starts_at ASC`, userID)
 	if err != nil {
@@ -430,7 +381,7 @@ func (s *Store) AcceptedSuggestions(userID int64) ([]Suggestion, error) {
 
 func (s *Store) countEvents() (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM events`).Scan(&n)
+	err := s.queryRow(`SELECT COUNT(*) FROM events`).Scan(&n)
 	return n, err
 }
 
@@ -460,8 +411,9 @@ func (s *Store) SeedEvents(src EventSource, force bool) error {
 			return err
 		}
 	}
+	insertEvent := s.rebind(s.insertIgnoreSQL(`INSERT INTO events (title, starts_at, city, url, tags) VALUES (?,?,?,?,?)`))
 	for _, e := range records {
-		if _, err := tx.Exec(`INSERT OR IGNORE INTO events (title, starts_at, city, url, tags) VALUES (?,?,?,?,?)`,
+		if _, err := tx.Exec(insertEvent,
 			e.Title, e.StartsAt.UTC(), e.City, e.URL, e.Tags); err != nil {
 			return err
 		}

@@ -21,9 +21,9 @@ func main() {
 
 	cfg := LoadConfig()
 
-	store, err := OpenStore(cfg.DatabasePath)
+	store, err := OpenStore(cfg)
 	if err != nil {
-		log.Fatalf("open store %s: %v", cfg.DatabasePath, err)
+		log.Fatalf("open store (%s): %v", storeTarget(cfg), err)
 	}
 	defer store.Close()
 	var events EventSource = NewCSVEventSource("events_live.csv", eventsCSV)
@@ -46,6 +46,9 @@ func main() {
 
 	stop := make(chan struct{})
 	go NewScheduler(srv, store).Run(stop)
+	// Sensitive signals expire rather than accumulate; the sweeper deletes
+	// them once they are past their retention window.
+	go store.RunRetention(stop)
 
 	httpSrv := &http.Server{
 		Addr:              ":" + cfg.Port,
@@ -54,7 +57,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("listening on :%s (db=%s, model=%s)", cfg.Port, cfg.DatabasePath, cfg.AnthropicModel)
+		log.Printf("listening on :%s (db=%s, model=%s)", cfg.Port, storeTarget(cfg), cfg.AnthropicModel)
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %v", err)
 		}

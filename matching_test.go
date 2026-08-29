@@ -206,7 +206,7 @@ func TestSignupCapturesInterestsThroughToRecommendation(t *testing.T) {
 }
 
 func TestSuggestEventToolReportsNoMatchHonestly(t *testing.T) {
-	store, err := OpenStore(filepath.Join(t.TempDir(), "nomatch.db"))
+	store, err := OpenStore(Config{DatabasePath: filepath.Join(t.TempDir(), "nomatch.db")})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

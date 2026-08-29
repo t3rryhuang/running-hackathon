@@ -23,6 +23,7 @@ type Config struct {
 	EventsFeedURL     string
 	ToolWebhookSecret string
 	DatabasePath      string
+	DatabaseURL       string
 	Port              string
 }
 
@@ -54,6 +55,7 @@ func LoadConfig() Config {
 		GCalICSURL:        os.Getenv("GCAL_ICS_URL"),
 		ToolWebhookSecret: os.Getenv("TOOL_WEBHOOK_SECRET"),
 		DatabasePath:      env("DATABASE_PATH", "./data.db"),
+		DatabaseURL:       os.Getenv("DATABASE_URL"),
 		Port:              env("PORT", "8090"),
 	}
 
@@ -76,6 +78,9 @@ func LoadConfig() Config {
 		if os.Getenv(k) == "" {
 			log.Printf("config: optional env %s not set", k)
 		}
+	}
+	if c.DatabaseURL == "" {
+		log.Printf("config: DATABASE_URL not set - falling back to the SQLite file at %s", c.DatabasePath)
 	}
 	return c
 }

@@ -32,7 +32,7 @@ func TestCSVEventSourceSkipsUnusableRows(t *testing.T) {
 }
 
 func TestSeedEventsIsIdempotentAndReseeds(t *testing.T) {
-	store, err := OpenStore(filepath.Join(t.TempDir(), "seed.db"))
+	store, err := OpenStore(Config{DatabasePath: filepath.Join(t.TempDir(), "seed.db")})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

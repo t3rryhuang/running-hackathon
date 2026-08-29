@@ -239,6 +239,7 @@ func TestDashboardShowsAnAccessibleCallState(t *testing.T) {
 		"/api/call-state",  // state comes from the server, not a timer
 		"visibilitychange", // a tab that was hidden re-syncs
 		"online",           // so does one that was offline
+		"holdUntil",        // a poll repaint does not wipe a just-asked-for answer
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("dashboard is missing call-state handling: %q", want)

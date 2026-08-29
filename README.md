@@ -25,24 +25,24 @@ flowchart LR
     end
 
     subgraph Providers
-        TW[Twilio\n+44 7414 145611]
-        EL[ElevenLabs Agent\nSTT / LLM / TTS]
-        ANT[Anthropic API\nSMS brain]
+        TW[Twilio<br/>+44 7414 145611]
+        EL[ElevenLabs Agent<br/>STT / LLM / TTS]
+        ANT[Anthropic API<br/>SMS brain]
     end
 
     subgraph Pi["Raspberry Pi 5 · runhack.keanuc.net"]
-        CADDY[Caddy\nTLS + CrowdSec]
-        APP[checkin\nsingle Go binary]
+        CADDY[Caddy<br/>TLS + CrowdSec]
+        APP[checkin<br/>single Go binary]
         PG[(Postgres 16)]
     end
 
     GCAL[Google Calendar ICS]
-    EVENTS[(Hackathon Radar\nevent export)]
+    EVENTS[(Hackathon Radar<br/>event export)]
 
     SMS -->|texts| TW -->|signed webhook /sms| CADDY
     VOICE <-->|PSTN| TW <-->|native integration| EL
     EL -->|tool webhooks /tools/*| CADDY
-    EL -->|post-call transcript\nHMAC /webhooks/elevenlabs| CADDY
+    EL -->|post-call transcript<br/>HMAC /webhooks/elevenlabs| CADDY
     WEB -->|wizard · OTP · dashboard| CADDY
     CADDY --> APP
     APP <--> PG

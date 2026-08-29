@@ -180,6 +180,10 @@
   }
 
   var checkinStatus = document.getElementById('checkin-status');
+  // An answer the user just asked for stays readable for a few seconds; a poll
+  // repaint arriving underneath it must not wipe it mid-sentence.
+  var holdUntil = 0;
+  function say(message) { checkinStatus.textContent = message; holdUntil = Date.now() + 5000; }
   var callBtn = document.getElementById('call-btn');
   var callLabel = callBtn.querySelector('[data-call-label]');
   // sending covers the gap between the click and the server's answer, when no
@@ -197,7 +201,8 @@
     callBtn.disabled = busy;
     callBtn.setAttribute('aria-busy', busy ? 'true' : 'false');
     callLabel.textContent = live ? 'Call in progress' : (sending ? 'Calling…' : 'Call me');
-    if (message !== undefined) checkinStatus.textContent = message;
+    if (message !== undefined) say(message);
+    else if (Date.now() < holdUntil) { /* a fresh answer is still on screen */ }
     else if (live) checkinStatus.textContent = 'A call is in progress. Pick up - this button unlocks when it ends.';
     else if (!sending) checkinStatus.textContent = '';
     if (live) schedulePoll(); else stopPoll();
@@ -236,10 +241,10 @@
         post('/api/checkin', { channel: channel }).then(function (res) {
           b.disabled = false;
           if (expired(res)) return;
-          checkinStatus.textContent = res.body.ok ? res.body.message : (res.body.error || 'That did not work.');
+          say(res.body.ok ? res.body.message : (res.body.error || 'That did not work.'));
         }).catch(function () {
           b.disabled = false;
-          checkinStatus.textContent = 'Could not reach the server.';
+          say('Could not reach the server.');
         });
         return;
       }

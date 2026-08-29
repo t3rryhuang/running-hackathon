@@ -1,20 +1,47 @@
 {{define "index.html"}}{{template "head" .}}
-<div class="dots" id="dots">
-  <span class="dot on"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span>
+<div class="progress" id="progress" role="progressbar" aria-label="Signup progress" aria-valuemin="1" aria-valuenow="1" aria-valuemax="7">
+  <span class="fill" id="progress-fill"></span>
 </div>
+<p class="sr-only" id="progress-label" aria-live="polite">Step 1 of 7</p>
 
-<div class="err" id="err" hidden></div>
+<div class="err" id="err" role="alert" hidden></div>
+
+<noscript>
+  <p class="sub">The step-by-step version needs JavaScript. This form does the same thing.</p>
+  <form method="post" action="/signup">
+    <label for="ns-name">Your name</label>
+    <input type="text" id="ns-name" name="name" autocomplete="given-name">
+    <label for="ns-phone">Your number, country code included</label>
+    <input type="tel" id="ns-phone" name="phone" placeholder="+447700900123" required>
+    <label for="ns-channel">Call or text</label>
+    <select id="ns-channel" name="channel">
+      <option value="sms">Text me</option>
+      <option value="call">Call me</option>
+    </select>
+    <label for="ns-frequency">How often</label>
+    <select id="ns-frequency" name="frequency">
+      <option value="daily">Daily</option>
+      <option value="twice-daily">Twice daily</option>
+      <option value="weekdays">Weekdays only</option>
+    </select>
+    <label for="ns-interests">What you're into (optional)</label>
+    <input type="text" id="ns-interests" name="interests" placeholder="hackathons, ai">
+    <button type="submit">Sign me up</button>
+  </form>
+</noscript>
 
 <section class="step on" data-step="0">
   <h1>What should I call you?</h1>
   <p class="sub">First name is plenty.</p>
-  <input type="text" id="name" class="big" placeholder="Keanu" autocomplete="given-name" autofocus>
+  <label for="name">Your first name</label>
+  <input type="text" id="name" class="big" placeholder="Type your name" autocomplete="given-name" autofocus>
   <button id="name-next">Continue</button>
 </section>
 
 <section class="step" data-step="1">
   <h1 id="phone-title">What's your number?</h1>
   <p class="sub">I'll check in on you here. Country code included.</p>
+  <label for="phone">Mobile number</label>
   <input type="tel" id="phone" class="big" placeholder="+447700900123" inputmode="tel" autocomplete="tel">
   <button id="phone-next">Continue</button>
 </section>
@@ -22,16 +49,31 @@
 <section class="step" data-step="2">
   <h1>Call or text?</h1>
   <p class="sub">However you'd rather be nudged.</p>
-  <button class="choice" data-channel="call"><strong>Call me</strong><span>A short voice check-in</span></button>
-  <button class="choice" data-channel="sms"><strong>Text me</strong><span>A conversation over SMS</span></button>
+  <button class="choice" data-channel="call" aria-pressed="false">
+    <span class="glyph" aria-hidden="true">&#9742;</span>
+    <span class="copy"><strong>Call me</strong><span class="desc">A short voice check-in</span></span>
+  </button>
+  <button class="choice" data-channel="sms" aria-pressed="false">
+    <span class="glyph" aria-hidden="true">&#9993;</span>
+    <span class="copy"><strong>Text me</strong><span class="desc">A conversation over SMS</span></span>
+  </button>
 </section>
 
 <section class="step" data-step="3">
   <h1>How often should I check in?</h1>
   <p class="sub">You can change this later.</p>
-  <button class="choice" data-frequency="daily"><strong>Daily</strong><span>Every morning at 9</span></button>
-  <button class="choice" data-frequency="twice-daily"><strong>Twice daily</strong><span>Morning and evening</span></button>
-  <button class="choice" data-frequency="weekdays"><strong>Weekdays only</strong><span>Monday to Friday</span></button>
+  <button class="choice" data-frequency="daily" aria-pressed="false">
+    <span class="glyph" aria-hidden="true">1&#215;</span>
+    <span class="copy"><strong>Daily</strong><span class="desc">Every morning at 9</span></span>
+  </button>
+  <button class="choice" data-frequency="twice-daily" aria-pressed="false">
+    <span class="glyph" aria-hidden="true">2&#215;</span>
+    <span class="copy"><strong>Twice daily</strong><span class="desc">Morning and evening</span></span>
+  </button>
+  <button class="choice" data-frequency="weekdays" aria-pressed="false">
+    <span class="glyph" aria-hidden="true">5&#215;</span>
+    <span class="copy"><strong>Weekdays only</strong><span class="desc">Monday to Friday</span></span>
+  </button>
 </section>
 
 <section class="step" data-step="4">
@@ -49,7 +91,8 @@
     <button type="button" class="chip" data-interest="hardware" aria-pressed="false">Hardware</button>
     <button type="button" class="chip" data-interest="startups" aria-pressed="false">Startups &amp; founders</button>
   </div>
-  <input type="text" id="interests-other" class="big" placeholder="Anything else? e.g. rust, design, climbing">
+  <label for="interests-other">Anything else, comma separated</label>
+  <input type="text" id="interests-other" placeholder="rust, design, climbing">
   <button id="interests-next">Continue</button>
   <button class="ghost" id="interests-skip">I'd rather not say</button>
 </section>
@@ -73,19 +116,47 @@
 (function () {
   var state = { name: "", phone: "", channel: "sms", frequency: "daily", interests: "" };
   var steps = document.querySelectorAll(".step");
-  var dots = document.querySelectorAll(".dot");
   var err = document.getElementById("err");
+  var bar = document.getElementById("progress");
+  var fill = document.getElementById("progress-fill");
+  var label = document.getElementById("progress-label");
+  var total = steps.length;
 
   function show(n) {
-    steps.forEach(function (s, i) { s.classList.toggle("on", i === n); });
-    dots.forEach(function (d, i) { d.classList.toggle("on", i <= n); });
+    steps.forEach(function (s, i) {
+      var on = i === n;
+      s.classList.toggle("on", on);
+      s.hidden = !on;
+    });
+    fill.style.width = Math.round(((n + 1) / total) * 100) + "%";
+    bar.setAttribute("aria-valuenow", String(n + 1));
+    bar.setAttribute("aria-valuemax", String(total));
+    label.textContent = "Step " + (n + 1) + " of " + total;
     err.hidden = true;
+    var h = steps[n].querySelector("h1");
+    if (h) { h.setAttribute("tabindex", "-1"); h.focus({ preventScroll: true }); }
   }
-  function fail(msg) { err.textContent = msg; err.hidden = false; }
+  function fail(msg, field) {
+    err.textContent = msg;
+    err.hidden = false;
+    if (field) { field.setAttribute("aria-invalid", "true"); field.focus(); }
+  }
+  function busy(btn, on) {
+    btn.classList.toggle("is-loading", on);
+    btn.disabled = on;
+    if (on) { btn.setAttribute("aria-busy", "true"); } else { btn.removeAttribute("aria-busy"); }
+  }
+  function pick(selector, el) {
+    document.querySelectorAll(selector).forEach(function (b) {
+      b.setAttribute("aria-pressed", b === el ? "true" : "false");
+    });
+  }
 
   document.getElementById("name-next").addEventListener("click", function () {
-    var v = document.getElementById("name").value.trim();
-    if (v.length < 1) { return fail("Give me something to call you."); }
+    var field = document.getElementById("name");
+    var v = field.value.trim();
+    if (v.length < 1) { return fail("Give me something to call you.", field); }
+    field.removeAttribute("aria-invalid");
     state.name = v;
     document.getElementById("phone-title").textContent = "Nice to meet you, " + v + ". What's your number?";
     document.getElementById("ring-title").textContent = "I'll ring you now to get to know you, " + v;
@@ -97,8 +168,12 @@
   });
 
   document.getElementById("phone-next").addEventListener("click", function () {
-    var v = document.getElementById("phone").value.replace(/[\s\-().]/g, "");
-    if (!/^\+[1-9]\d{7,14}$/.test(v)) { return fail("Needs to be E.164, like +447700900123."); }
+    var field = document.getElementById("phone");
+    var v = field.value.replace(/[\s\-().]/g, "");
+    if (!/^\+[1-9]\d{7,14}$/.test(v)) {
+      return fail("Include the country code, like +447700900123.", field);
+    }
+    field.removeAttribute("aria-invalid");
     state.phone = v;
     show(2);
   });
@@ -107,11 +182,19 @@
   });
 
   document.querySelectorAll("[data-channel]").forEach(function (b) {
-    b.addEventListener("click", function () { state.channel = b.dataset.channel; show(3); });
+    b.addEventListener("click", function () {
+      state.channel = b.dataset.channel;
+      pick("[data-channel]", b);
+      show(3);
+    });
   });
 
   document.querySelectorAll("[data-frequency]").forEach(function (b) {
-    b.addEventListener("click", function () { state.frequency = b.dataset.frequency; show(4); });
+    b.addEventListener("click", function () {
+      state.frequency = b.dataset.frequency;
+      pick("[data-frequency]", b);
+      show(4);
+    });
   });
 
   document.querySelectorAll("[data-interest]").forEach(function (b) {
@@ -136,20 +219,22 @@
   document.getElementById("interests-next").addEventListener("click", function () {
     state.interests = collectInterests();
     if (!state.interests) { return fail("Pick at least one, or tap \u201cI'd rather not say\u201d."); }
-    signup();
+    signup(this);
   });
   document.getElementById("interests-skip").addEventListener("click", function () {
     state.interests = "";
-    signup();
+    signup(this);
   });
 
-  function signup() {
+  function signup(btn) {
     var body = new URLSearchParams(state);
+    busy(btn, true);
     fetch("/signup", {
       method: "POST",
       headers: { "Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded" },
       body: body
     }).then(function (r) { return r.json(); }).then(function (j) {
+      busy(btn, false);
       if (!j.ok) { return fail(j.error || "Something went wrong."); }
       document.getElementById("journal-link").href = j.journal;
       if (state.channel === "call") {
@@ -159,16 +244,17 @@
           "Check your phone - I've texted " + state.phone + ". Reply to it and your first check-in starts.";
         show(6);
       }
-    }).catch(function () { fail("Could not reach the server."); });
+    }).catch(function () {
+      busy(btn, false);
+      fail("Could not reach the server.");
+    });
   }
 
   document.getElementById("call-now").addEventListener("click", function () {
     var btn = this;
-    btn.disabled = true;
-    btn.textContent = "Ringing " + state.phone + "...";
+    busy(btn, true);
     post("/call").then(function (j) {
-      btn.disabled = false;
-      btn.textContent = "Call me now";
+      busy(btn, false);
       if (!j.ok) { return fail(j.error || "Could not place the call."); }
       document.getElementById("done-sub").textContent = "Pick up - I'm calling " + state.phone + " now.";
       show(6);
@@ -181,12 +267,15 @@
   });
 
   document.getElementById("simulate").addEventListener("click", function () {
+    var btn = this;
     var status = document.getElementById("sim-status");
+    busy(btn, true);
     status.textContent = "Sending...";
     fetch("/trigger?phone=" + encodeURIComponent(state.phone), { method: "POST" })
       .then(function (r) { return r.json(); })
       .then(function (j) { status.textContent = j.ok ? "Sent - check your phone." : "Trigger failed."; })
-      .catch(function () { status.textContent = "Trigger failed."; });
+      .catch(function () { status.textContent = "Trigger failed."; })
+      .then(function () { busy(btn, false); });
   });
 
   function post(path) {

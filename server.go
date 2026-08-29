@@ -25,6 +25,9 @@ var templateFS embed.FS
 //go:embed events_live.csv
 var eventsCSV []byte
 
+//go:embed static
+var staticFS embed.FS
+
 var tmpl = template.Must(template.ParseFS(templateFS, "templates/*.html"))
 
 var e164 = regexp.MustCompile(`^\+[1-9]\d{7,14}$`)
@@ -57,9 +60,21 @@ func NewServer(cfg Config, store *Store, brain *Brain, tel Telephony, voice Voic
 	}
 }
 
+// staticHandler serves the embedded brand assets. They are content-stable for a
+// given build, so they are cached hard rather than revalidated on every step of
+// the wizard.
+func staticHandler() http.Handler {
+	files := http.FileServer(http.FS(staticFS))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		files.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
+	mux.Handle("/static/", staticHandler())
 	mux.HandleFunc("/signup", s.handleSignup)
 	mux.HandleFunc("/call", timed("http.call", s.handleCall))
 	mux.HandleFunc("/settings", s.handleSettings)

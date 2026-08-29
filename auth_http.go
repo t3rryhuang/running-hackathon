@@ -94,11 +94,18 @@ func (s *Server) requireUser(h func(http.ResponseWriter, *http.Request, *User)) 
 }
 
 func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string, expires time.Time) {
+	// An empty token means "forget this": browsers drop a cookie on a negative
+	// MaxAge, which a past expiry alone does not reliably achieve.
+	maxAge := 0
+	if token == "" {
+		maxAge = -1
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     authSessionCookie,
 		Value:    token,
 		Path:     "/",
 		Expires:  expires,
+		MaxAge:   maxAge,
 		HttpOnly: true,
 		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
 		SameSite: http.SameSiteLaxMode,
@@ -362,10 +369,12 @@ func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setSessionCookie(w, r, "", time.Unix(0, 0))
 	if r.Header.Get("accept") == "application/json" || r.Method == http.MethodPost {
-		writeJSON(w, http.StatusOK, map[string]any{"signed_out": true})
+		writeJSON(w, http.StatusOK, map[string]any{"signed_out": true, "next": "/"})
 		return
 	}
-	http.Redirect(w, r, "/login", http.StatusSeeOther)
+	// Signing out lands on the front page, signed out, rather than on a form
+	// that looks like the one you just left.
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 // maskPhone keeps the last four digits, which is enough for somebody to

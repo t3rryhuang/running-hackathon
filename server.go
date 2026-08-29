@@ -775,6 +775,11 @@ func (s *Server) render(w http.ResponseWriter, name string, data map[string]any)
 
 func (s *Server) renderStatus(w http.ResponseWriter, status int, name string, data map[string]any) {
 	w.Header().Set("content-type", "text/html; charset=utf-8")
+	// Every page here is drawn from whoever the session says you are, so none of
+	// them may be kept: without this the back button, or a restored tab, hands
+	// back a signed-in page after a sign-out.
+	w.Header().Set("cache-control", "no-store, no-cache, must-revalidate")
+	w.Header().Set("pragma", "no-cache")
 	w.WriteHeader(status)
 	if err := tmpl.ExecuteTemplate(w, name, data); err != nil {
 		log.Printf("render %s: %v", name, err)

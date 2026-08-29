@@ -141,6 +141,11 @@ func TestSessionsResolveExpireAndRevoke(t *testing.T) {
 	store := testStore(t)
 	u, _ := store.EnsureUser("+447700900104")
 	now := time.Now()
+	// A session stands for a proved number, so the profile has to carry the
+	// proof before one resolves at all.
+	if err := store.MarkPhoneVerified(u.ID, "otp"); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
 
 	token, err := store.StartAuthSession(u.ID, now)
 	if err != nil {

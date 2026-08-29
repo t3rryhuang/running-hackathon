@@ -230,7 +230,17 @@ func (s *Store) AuthSessionUser(token string, now time.Time) (*User, error) {
 	if _, err := s.exec(`UPDATE auth_sessions SET last_seen_at=? WHERE id=?`, now.UTC(), sess.ID); err != nil {
 		return nil, err
 	}
-	return s.UserByID(sess.UserID)
+	u, err := s.UserByID(sess.UserID)
+	if err != nil {
+		return nil, err
+	}
+	// A session only ever means "this number was proved". If the verification
+	// is gone from the profile, so is the session: the token cannot outlive the
+	// fact it stands for.
+	if u == nil || !u.PhoneVerified() {
+		return nil, errNoSession
+	}
+	return u, nil
 }
 
 // RevokeAuthSession ends one session. Signing out is a revocation rather than

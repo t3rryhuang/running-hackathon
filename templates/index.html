@@ -29,7 +29,7 @@
   <h1>Enter your code</h1>
   <p class="sub" id="code-sub">Six digits, texted to your phone. It expires in ten minutes.</p>
   <label for="code">Verification code</label>
-  <input type="text" id="code" class="big" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]*" maxlength="6">
+  <input type="text" id="code" class="big" inputmode="numeric" autocomplete="one-time-code" autocorrect="off" spellcheck="false" pattern="[0-9]*" maxlength="6">
   <button id="code-next">Verify</button>
   <button type="button" class="quiet" id="resend" disabled>Send another code</button>
   <p class="hint"><a href="#" id="wrong-number">Wrong number?</a></p>
@@ -118,6 +118,18 @@
     });
   }
   function el(id) { return document.getElementById(id); }
+
+  // A restored tab, a back button or a reload hands the old values back. None
+  // of them belong to this sign-up: whoever is here now starts empty, so a
+  // signed-out browser never shows the last person's number, code or name.
+  function blank() {
+    document.querySelectorAll(".step input").forEach(function (i) {
+      i.value = "";
+      i.removeAttribute("aria-invalid");
+    });
+  }
+  blank();
+  window.addEventListener("pageshow", function (e) { if (e.persisted) { blank(); } });
 
   if (steps.length) { show(0); }
 

@@ -231,13 +231,13 @@
     deleteStatus.textContent = 'Deleting…';
     post('/api/forget', { confirm: 'DELETE' }).then(function (res) {
       if (!res.body.ok) { deleteStatus.textContent = res.body.error || 'Could not delete your data.'; return; }
-      window.location.href = '/';
+      window.location.replace('/');
     }).catch(function () { deleteStatus.textContent = 'Could not reach the server.'; });
   });
 
   document.getElementById('signout').addEventListener('click', function () {
     fetch('/auth/logout', { method: 'POST', headers: { accept: 'application/json' } })
-      .then(function () { window.location.href = '/login'; });
+      .then(function () { window.location.replace('/'); });
   });
 
   load();

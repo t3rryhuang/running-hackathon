@@ -219,3 +219,67 @@ func TestSigningOutEndsTheSession(t *testing.T) {
 		t.Error("the signed-out page still names the person")
 	}
 }
+
+// Signing out from a link lands on the front page, and the cookie is told to go
+// rather than merely being backdated.
+func TestSigningOutSendsYouHomeAndDropsTheCookie(t *testing.T) {
+	srv, store, tel, _ := newTestServer(t, nil)
+	cookie := onboardedUser(t, srv, store, tel, "+447700900311", "Isla")
+
+	rec := get(t, srv, "/auth/logout", cookie)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/" {
+		t.Fatalf("sign-out went to %q with %d", rec.Header().Get("Location"), rec.Code)
+	}
+	set := rec.Header().Get("Set-Cookie")
+	if !strings.Contains(set, authSessionCookie+"=;") || !strings.Contains(set, "Max-Age=0") {
+		t.Fatalf("session cookie was not dropped: %q", set)
+	}
+}
+
+// Nothing personal may be cached: a back button after signing out must not hand
+// the previous page back.
+func TestPersonalPagesAreNeverCached(t *testing.T) {
+	srv, store, tel, _ := newTestServer(t, nil)
+	cookie := onboardedUser(t, srv, store, tel, "+447700900312", "Jun")
+
+	for path, c := range map[string]*http.Cookie{"/dashboard": cookie, "/": nil, "/login": nil} {
+		if got := get(t, srv, path, c).Header().Get("Cache-Control"); !strings.Contains(got, "no-store") {
+			t.Errorf("%s is cacheable: %q", path, got)
+		}
+	}
+}
+
+// The sign-up page starts empty however the browser got here: no number, code
+// or name is rendered into it for the next person to find.
+func TestTheSignupPageHoldsNobodysAnswers(t *testing.T) {
+	srv, store, tel, _ := newTestServer(t, nil)
+	cookie := onboardedUser(t, srv, store, tel, "+447700900313", "Kit")
+	postForm(t, srv, "/auth/logout", url.Values{}, cookie)
+
+	body := get(t, srv, "/", cookie).Body.String()
+	for _, gone := range []string{"+447700900313", "0313", "Kit", "value="} {
+		if strings.Contains(body, gone) {
+			t.Errorf("signed-out sign-up page still carries %q", gone)
+		}
+	}
+}
+
+// A session is only ever shorthand for a proved number. Take the proof away and
+// the token stops meaning anything, whatever the browser still holds.
+func TestASessionDiesWithItsVerification(t *testing.T) {
+	srv, store, tel, _ := newTestServer(t, nil)
+	cookie := onboardedUser(t, srv, store, tel, "+447700900314", "Lex")
+	if rec := get(t, srv, "/dashboard", cookie); rec.Code != http.StatusOK {
+		t.Fatalf("dashboard before: %d", rec.Code)
+	}
+
+	if _, err := store.exec(`UPDATE users SET phone_verified_at=NULL WHERE phone=?`, "+447700900314"); err != nil {
+		t.Fatalf("unverify: %v", err)
+	}
+	if rec := get(t, srv, "/dashboard", cookie); rec.Code != http.StatusSeeOther {
+		t.Fatalf("an unverified profile still opened the dashboard: %d", rec.Code)
+	}
+	if rec := postForm(t, srv, "/api/checkin", url.Values{"channel": {"sms"}}, cookie); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("an unverified profile still started a check-in: %d", rec.Code)
+	}
+}

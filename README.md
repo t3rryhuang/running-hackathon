@@ -12,7 +12,8 @@ behind Caddy.
 
 1. `main.go` boots config → SQLite store → calendar cache → brain → telephony → voice → HTTP mux + scheduler goroutine.
 2. `db.go` owns the schema (`users`, `checkins`, `events`, `suggestions`, `messages`) and seeds events from an `EventSource`.
-3. `server.go` is the whole HTTP surface: wizard page, `/signup`, `/call`, `/settings`, `/sms`, `/journal`, `/trigger`, `/healthz`, `/tools/*`.
+3. `server.go` is the whole HTTP surface: wizard page, `/signup`, `/call`, `/settings`, `/sms`, `/journal`, `/trigger`, `/healthz`, `/metrics`, `/tools/*`.
+4. `matching.go` decides which event a user is offered: scored on their stated interests, the event's tags, city and timing, with reasons attached. Audience-restricted events are only offered to people who said they are in that audience, and when nothing clears the bar the tools return `no_match` instead of a weak suggestion.
 4. `brain.go` is the SMS brain: it builds a memory + calendar + suggestion-state preamble and runs an Anthropic tool-use loop.
 5. Tools exposed to the model: `save_checkin`, `suggest_event`, `accept_suggestion` — the same three operations the voice agent gets over HTTP.
 6. `anthropic.go` is a thin Messages API client behind the `AnthropicClient` interface, so tests inject a fake brain.
@@ -90,6 +91,9 @@ still boots. Never commit a real `.env`.
 # health
 curl -s localhost:8090/healthz
 
+# latency summary (p50/p95/max per operation) - see LATENCY.md
+curl -s localhost:8090/metrics
+
 # onboarding page
 curl -s localhost:8090/
 
@@ -97,6 +101,7 @@ curl -s localhost:8090/
 curl -s -X POST localhost:8090/signup \
   --data-urlencode "phone=+447700900123" \
   -d "name=Keanu&channel=sms&frequency=daily" \
+  --data-urlencode "interests=hackathons, ai" \
   --data-urlencode "ics_url=https://calendar.google.com/calendar/ical/.../basic.ics"
 
 # inbound SMS (what Twilio posts) → TwiML

@@ -94,8 +94,15 @@ type httpAnthropicClient struct {
 func NewAnthropicClient(apiKey string) AnthropicClient {
 	return &httpAnthropicClient{
 		apiKey: apiKey,
-		client: &http.Client{Timeout: 45 * time.Second},
-		base:   "https://api.anthropic.com",
+		client: &http.Client{
+			Timeout: 45 * time.Second,
+			Transport: &http.Transport{
+				MaxIdleConnsPerHost: 4,
+				IdleConnTimeout:     5 * time.Minute,
+				ForceAttemptHTTP2:   true,
+			},
+		},
+		base: "https://api.anthropic.com",
 	}
 }
 
@@ -115,8 +122,11 @@ func (c *httpAnthropicClient) CreateMessage(ctx context.Context, req AnthropicRe
 	httpReq.Header.Set("x-api-key", c.apiKey)
 	httpReq.Header.Set("anthropic-version", anthropicVersion)
 
+	start := time.Now()
 	resp, err := c.client.Do(httpReq)
+	metrics.Record("anthropic.messages", time.Since(start))
 	if err != nil {
+		metrics.RecordErr("anthropic.messages", err.Error())
 		return nil, err
 	}
 	defer resp.Body.Close()

@@ -87,6 +87,16 @@ func (b *Brain) CalendarFor(u *User) []CalendarEvent {
 	return b.cal.Today(url)
 }
 
+// WarmCalendar pre-fetches the user's feed off the critical path, so the first
+// tool call of a live conversation does not wait on an ICS round trip.
+func (b *Brain) WarmCalendar(u *User) {
+	url := u.ICSURL
+	if url == "" {
+		url = b.gcal
+	}
+	b.cal.Warm(url)
+}
+
 // contextBlock renders memory + calendar + suggestion state as a compact
 // preamble the model reads before the live conversation.
 func (b *Brain) contextBlock(u *User) string {

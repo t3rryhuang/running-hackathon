@@ -150,42 +150,119 @@ type cacheEntry struct {
 	fetched time.Time
 }
 
-// Calendar fetches and caches ICS feeds for 5 minutes per URL.
+// Calendar fetches and caches ICS feeds. It is on the voice critical path: the
+// agent calls get_context mid-conversation, so a slow Google ICS fetch would be
+// silence the caller hears. The cache therefore serves stale data immediately
+// and refreshes in the background, and a cold fetch is capped by maxBlock.
 type Calendar struct {
-	mu     sync.Mutex
-	cache  map[string]cacheEntry
-	ttl    time.Duration
-	client *http.Client
+	mu       sync.Mutex
+	cache    map[string]cacheEntry
+	inflight map[string]bool
+	ttl      time.Duration
+	maxBlock time.Duration
+	client   *http.Client
 }
 
 func NewCalendar() *Calendar {
 	return &Calendar{
-		cache:  map[string]cacheEntry{},
-		ttl:    5 * time.Minute,
-		client: &http.Client{Timeout: 10 * time.Second},
+		cache:    map[string]cacheEntry{},
+		inflight: map[string]bool{},
+		ttl:      5 * time.Minute,
+		maxBlock: 1500 * time.Millisecond,
+		client: &http.Client{
+			Timeout: 10 * time.Second,
+			// Keep the TLS connection to the calendar host alive between
+			// check-ins so a refresh is one round trip, not a full handshake.
+			Transport: &http.Transport{
+				MaxIdleConnsPerHost: 4,
+				IdleConnTimeout:     90 * time.Second,
+				ForceAttemptHTTP2:   true,
+			},
+		},
 	}
 }
 
 // Today returns today's Europe/London events for the given ICS url. An empty
-// url or any fetch error yields an empty list - calendar context is optional.
+// url or any fetch error yields an empty list - calendar context is optional,
+// and it is never worth making someone wait on the phone for it.
 func (c *Calendar) Today(url string) []CalendarEvent {
 	if url == "" {
 		return nil
 	}
+	defer track("calendar.today")()
+
 	c.mu.Lock()
-	entry, ok := c.cache[url]
+	entry, have := c.cache[url]
+	fresh := have && time.Since(entry.fetched) <= c.ttl
 	c.mu.Unlock()
-	if !ok || time.Since(entry.fetched) > c.ttl {
-		events, err := c.fetch(url)
-		if err != nil {
-			return nil
-		}
-		entry = cacheEntry{events: events, fetched: time.Now()}
-		c.mu.Lock()
-		c.cache[url] = entry
-		c.mu.Unlock()
+
+	if fresh {
+		return EventsOn(entry.events, time.Now())
 	}
+	done := c.refresh(url)
+	if have {
+		// Stale beats slow: yesterday's copy of a calendar is nearly always
+		// right, and the refresh will land before the next turn.
+		metrics.Record("calendar.stale_hit", 0)
+		return EventsOn(entry.events, time.Now())
+	}
+	select {
+	case <-done:
+	case <-time.After(c.maxBlock):
+		// Cold cache and the feed is slow: answer without calendar context
+		// rather than holding the call open.
+		metrics.RecordErr("calendar.today", "cold fetch exceeded "+c.maxBlock.String())
+		return nil
+	}
+	c.mu.Lock()
+	entry = c.cache[url]
+	c.mu.Unlock()
 	return EventsOn(entry.events, time.Now())
+}
+
+// Warm pre-fetches a feed off the critical path - called when a call is placed
+// so the agent's first get_context hits a warm cache.
+func (c *Calendar) Warm(url string) {
+	if url == "" {
+		return
+	}
+	c.mu.Lock()
+	entry, have := c.cache[url]
+	c.mu.Unlock()
+	if have && time.Since(entry.fetched) <= c.ttl {
+		return
+	}
+	c.refresh(url)
+}
+
+// refresh starts one background fetch per url and returns a channel closed when
+// that fetch finishes, so concurrent callers share a single request.
+func (c *Calendar) refresh(url string) <-chan struct{} {
+	done := make(chan struct{})
+	c.mu.Lock()
+	if c.inflight[url] {
+		c.mu.Unlock()
+		close(done)
+		return done
+	}
+	c.inflight[url] = true
+	c.mu.Unlock()
+
+	go func() {
+		defer close(done)
+		start := time.Now()
+		events, err := c.fetch(url)
+		metrics.Record("calendar.fetch", time.Since(start))
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		delete(c.inflight, url)
+		if err != nil {
+			metrics.RecordErr("calendar.fetch", err.Error())
+			return
+		}
+		c.cache[url] = cacheEntry{events: events, fetched: time.Now()}
+	}()
+	return done
 }
 
 func (c *Calendar) fetch(url string) ([]CalendarEvent, error) {

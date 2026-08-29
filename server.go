@@ -61,23 +61,32 @@ func (s *Server) Routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/signup", s.handleSignup)
-	mux.HandleFunc("/call", s.handleCall)
+	mux.HandleFunc("/call", timed("http.call", s.handleCall))
 	mux.HandleFunc("/settings", s.handleSettings)
-	mux.HandleFunc("/sms", s.handleSMS)
+	mux.HandleFunc("/sms", timed("http.sms", s.handleSMS))
 	mux.HandleFunc("/journal", s.handleJournal)
 	mux.HandleFunc("/healthz", s.handleHealthz)
+	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/trigger", s.handleTrigger)
-	mux.HandleFunc("/tools/get_context", s.toolAuth(s.toolGetContext))
-	mux.HandleFunc("/tools/save_onboarding", s.toolAuth(s.toolSaveOnboarding))
-	mux.HandleFunc("/tools/save_checkin", s.toolAuth(s.toolSaveCheckin))
-	mux.HandleFunc("/tools/suggest_event", s.toolAuth(s.toolSuggestEvent))
-	mux.HandleFunc("/tools/accept_suggestion", s.toolAuth(s.toolAcceptSuggestion))
+	// Tool webhooks land mid-conversation: their server time is dead air the
+	// caller hears, so each one is measured separately.
+	mux.HandleFunc("/tools/get_context", timed("tool.get_context", s.toolAuth(s.toolGetContext)))
+	mux.HandleFunc("/tools/save_onboarding", timed("tool.save_onboarding", s.toolAuth(s.toolSaveOnboarding)))
+	mux.HandleFunc("/tools/save_checkin", timed("tool.save_checkin", s.toolAuth(s.toolSaveCheckin)))
+	mux.HandleFunc("/tools/suggest_event", timed("tool.suggest_event", s.toolAuth(s.toolSuggestEvent)))
+	mux.HandleFunc("/tools/accept_suggestion", timed("tool.accept_suggestion", s.toolAuth(s.toolAcceptSuggestion)))
 	return mux
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("content-type", "text/plain")
 	fmt.Fprint(w, "ok")
+}
+
+// handleMetrics exposes the in-process latency summary. No auth: it is timings
+// only, no user data, and the operator needs it from the Pi during a demo.
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"ops": metrics.Stats()})
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -362,6 +371,10 @@ func (s *Server) TriggerCheckin(u *User) error {
 // placeCall rings the user and remembers the Twilio call SID ElevenLabs reports
 // back, which is what lets the service hang up when onboarding finishes.
 func (s *Server) placeCall(u *User) error {
+	// The agent asks for context within a second of the caller picking up, so
+	// fetch the calendar while the phone is still ringing.
+	go s.brain.WarmCalendar(u)
+	defer track("call.place")()
 	res, err := s.voice.Call(CallRequest{To: u.Phone, Name: u.Name, Onboarded: u.Onboarded()})
 	if err != nil {
 		return err

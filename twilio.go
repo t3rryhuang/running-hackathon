@@ -60,8 +60,17 @@ func NewTelephony(cfg Config) Telephony {
 		accountSID: cfg.TwilioAccountSID,
 		authToken:  cfg.TwilioAuthToken,
 		from:       cfg.TwilioNumber,
-		client:     &http.Client{Timeout: 15 * time.Second},
-		base:       twilioAPIBase(cfg.TwilioEdge, cfg.TwilioRegion),
+		client: &http.Client{
+			Timeout: 15 * time.Second,
+			// Hang-ups and welcome texts are one-shot POSTs; reusing the
+			// connection keeps them off a fresh TLS handshake each time.
+			Transport: &http.Transport{
+				MaxIdleConnsPerHost: 4,
+				IdleConnTimeout:     5 * time.Minute,
+				ForceAttemptHTTP2:   true,
+			},
+		},
+		base: twilioAPIBase(cfg.TwilioEdge, cfg.TwilioRegion),
 	}
 }
 
@@ -78,6 +87,7 @@ func (t *twilioClient) HangUp(callSID string) error {
 }
 
 func (t *twilioClient) post(resource string, form url.Values) error {
+	defer track("twilio." + strings.TrimSuffix(strings.SplitN(resource, "/", 2)[0], ".json"))()
 	endpoint := fmt.Sprintf("%s/2010-04-01/Accounts/%s/%s", t.base, t.accountSID, resource)
 	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {

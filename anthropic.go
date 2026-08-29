@@ -33,6 +33,30 @@ type ContentBlock struct {
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	Content   string `json:"content,omitempty"`
 	IsError   bool   `json:"is_error,omitempty"`
+
+	// raw keeps the exact JSON of a block received from the API. Blocks such as
+	// thinking must be echoed back byte-for-byte in the next request, so decoded
+	// blocks re-marshal to their original bytes.
+	raw json.RawMessage
+}
+
+func (c *ContentBlock) UnmarshalJSON(b []byte) error {
+	type alias ContentBlock
+	var a alias
+	if err := json.Unmarshal(b, &a); err != nil {
+		return err
+	}
+	*c = ContentBlock(a)
+	c.raw = append(json.RawMessage(nil), b...)
+	return nil
+}
+
+func (c ContentBlock) MarshalJSON() ([]byte, error) {
+	if len(c.raw) > 0 {
+		return c.raw, nil
+	}
+	type alias ContentBlock
+	return json.Marshal(alias(c))
 }
 
 type ToolDef struct {

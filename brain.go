@@ -238,6 +238,10 @@ func (b *Brain) SaveCheckin(u *User, mood *int, summary, topics, raw string) err
 	if mood != nil && (*mood < 1 || *mood > 5) {
 		mood = nil
 	}
+	summary = strings.TrimSpace(summary)
+	if summary == "" && mood == nil {
+		return fmt.Errorf("check-in needs a summary or a mood")
+	}
 	return b.store.AddCheckin(&Checkin{
 		UserID:  u.ID,
 		Mood:    mood,

@@ -96,6 +96,12 @@ func (s *Store) UserByPhone(phone string) (*User, error) {
 	return scanUser(s.queryRow(userSelect+` WHERE phone = ?`, phone))
 }
 
+// UserByID reloads a person the service has already resolved, for paths that
+// hold an id from a session rather than a number from a webhook.
+func (s *Store) UserByID(id int64) (*User, error) {
+	return scanUser(s.queryRow(userSelect+` WHERE id = ?`, id))
+}
+
 func scanUser(row scanner) (*User, error) {
 	var u User
 	var onboarded, last, verified sql.NullTime

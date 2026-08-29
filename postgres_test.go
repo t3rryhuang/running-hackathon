@@ -113,6 +113,42 @@ func TestPostgresBackend(t *testing.T) {
 		t.Fatalf("accepted suggestions: %v", err)
 	}
 
+	// Transcripts and sign-in are the newest tables; prove their SQL and their
+	// upsert-on-conversation-id behaviour on Postgres too.
+	for i := 0; i < 2; i++ {
+		if err := store.SaveTranscript(&Transcript{
+			UserID: u.ID, ConversationID: "conv_pg_" + phone, Summary: "pg call",
+			Body: "we talked about hackathons", StartedAt: time.Now().UTC(),
+		}); err != nil {
+			t.Fatalf("save transcript: %v", err)
+		}
+	}
+	if items, total, err := store.Transcripts(u.ID, "hackathons", 10, 0); err != nil || total != 1 || len(items) != 1 {
+		t.Fatalf("transcript search on postgres: %d rows (%v)", total, err)
+	}
+
+	code, err := store.IssueLoginCode(phone, time.Now())
+	if err != nil {
+		t.Fatalf("issue code: %v", err)
+	}
+	if err := store.ConsumeLoginCode(phone, code, time.Now()); err != nil {
+		t.Fatalf("consume code: %v", err)
+	}
+	token, err := store.StartAuthSession(u.ID, time.Now())
+	if err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if got, err := store.AuthSessionUser(token, time.Now()); err != nil || got.ID != u.ID {
+		t.Fatalf("session lookup on postgres: %v", err)
+	}
+	store.RecordAuthEvent(phone, u.ID, "login_ok", "")
+	if events, err := store.AuthEvents(phone, 5); err != nil || len(events) == 0 {
+		t.Fatalf("audit trail on postgres: %v %v", events, err)
+	}
+	if err := store.PurgeExpiredAuth(time.Now()); err != nil {
+		t.Fatalf("purge auth: %v", err)
+	}
+
 	if err := store.ForgetUser(u.ID); err != nil {
 		t.Fatalf("forget: %v", err)
 	}

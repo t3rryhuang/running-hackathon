@@ -1,0 +1,129 @@
+{{define "dashboard.html"}}{{template "head" .}}
+<h1>{{if .User.Name}}{{.User.Name}}'s calls{{else}}Your calls{{end}}</h1>
+<p class="sub">{{.User.Phone}} &middot; only you can see these &middot; kept for {{.RetainDays}} days</p>
+
+<div class="panel">
+  <label for="q">Search your calls</label>
+  <input id="q" type="search" placeholder="a word you said, or a summary" autocomplete="off">
+  <button id="signout">Sign out</button>
+</div>
+
+<div class="status" id="status" role="status" aria-live="polite">Loading your calls…</div>
+<div id="list"></div>
+
+<div class="panel" id="pager" hidden>
+  <button id="prev">Previous</button>
+  <span id="page-label"></span>
+  <button id="next">Next</button>
+</div>
+
+<noscript><p class="hint">This page needs JavaScript to load your calls.</p></noscript>
+
+<script>
+(function () {
+  var list = document.getElementById('list');
+  var status = document.getElementById('status');
+  var pager = document.getElementById('pager');
+  var pageLabel = document.getElementById('page-label');
+  var q = document.getElementById('q');
+  var page = 1, pages = 1, timer = null;
+
+  function say(msg, bad) {
+    status.textContent = msg || '';
+    status.className = bad ? 'status err' : 'status';
+    status.hidden = !msg;
+  }
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
+  }
+
+  function minutes(secs) {
+    var m = Math.floor(secs / 60), s = secs % 60;
+    return m + 'm ' + (s < 10 ? '0' : '') + s + 's';
+  }
+
+  function card(t) {
+    var c = el('div', 'card');
+    c.appendChild(el('div', 'when', t.when + ' · ' + minutes(t.seconds) + ' · ' + t.turns + ' turns'));
+    c.appendChild(el('div', '', t.summary || 'No summary for this call.'));
+    var body = el('pre', 'transcript');
+    body.hidden = true;
+    var open = el('button', 'link', 'Read transcript');
+    open.addEventListener('click', function () {
+      if (!body.hidden) { body.hidden = true; open.textContent = 'Read transcript'; return; }
+      open.textContent = 'Loading…';
+      fetch('/api/transcripts/' + t.id, { headers: { accept: 'application/json' } })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          body.textContent = d.body || 'This call has no transcript text.';
+          body.hidden = false;
+          open.textContent = 'Hide transcript';
+        })
+        .catch(function () { open.textContent = 'Could not load — retry'; });
+    });
+    var del = el('button', 'link danger', 'Delete');
+    del.addEventListener('click', function () {
+      if (!window.confirm('Delete this transcript permanently?')) return;
+      fetch('/api/transcripts/' + t.id, { method: 'DELETE', headers: { accept: 'application/json' } })
+        .then(function (r) { if (!r.ok) throw new Error(); load(); })
+        .catch(function () { say('Could not delete that call.', true); });
+    });
+    var actions = el('div', 'actions');
+    actions.appendChild(open);
+    actions.appendChild(del);
+    c.appendChild(actions);
+    c.appendChild(body);
+    return c;
+  }
+
+  function load() {
+    say('Loading your calls…');
+    fetch('/api/transcripts?page=' + page + '&q=' + encodeURIComponent(q.value), { headers: { accept: 'application/json' } })
+      .then(function (r) {
+        if (r.status === 401) { window.location.href = '/login'; return null; }
+        if (!r.ok) throw new Error();
+        return r.json();
+      })
+      .then(function (d) {
+        if (!d) return;
+        list.innerHTML = '';
+        pages = d.pages || 1;
+        if (!d.transcripts.length) {
+          say('');
+          var empty = el('div', 'empty');
+          empty.appendChild(el('p', '', q.value
+            ? 'Nothing in your calls matches “' + q.value + '”.'
+            : 'No calls yet. After your next check-in call the transcript lands here.'));
+          list.appendChild(empty);
+          pager.hidden = true;
+          return;
+        }
+        say('');
+        d.transcripts.forEach(function (t) { list.appendChild(card(t)); });
+        pager.hidden = pages < 2;
+        pageLabel.textContent = 'Page ' + d.page + ' of ' + pages;
+        document.getElementById('prev').disabled = d.page <= 1;
+        document.getElementById('next').disabled = d.page >= pages;
+      })
+      .catch(function () { say('Could not load your calls. Refresh to try again.', true); });
+  }
+
+  q.addEventListener('input', function () {
+    clearTimeout(timer);
+    timer = setTimeout(function () { page = 1; load(); }, 250);
+  });
+  document.getElementById('prev').addEventListener('click', function () { if (page > 1) { page--; load(); } });
+  document.getElementById('next').addEventListener('click', function () { if (page < pages) { page++; load(); } });
+  document.getElementById('signout').addEventListener('click', function () {
+    fetch('/auth/logout', { method: 'POST', headers: { accept: 'application/json' } })
+      .then(function () { window.location.href = '/login'; });
+  });
+
+  load();
+})();
+</script>
+{{template "foot" .}}{{end}}

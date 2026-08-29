@@ -1,0 +1,70 @@
+{{define "login.html"}}{{template "head" .}}
+<h1>Sign in</h1>
+<p class="sub">We text a six-digit code to your number. No password to forget.</p>
+
+<form id="phone-step" class="panel" method="post" action="/auth/request">
+  <label for="phone">Your number</label>
+  <input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="+44 7700 900123" required>
+  <button type="submit" id="send">Text me a code</button>
+</form>
+
+<form id="code-step" class="panel" method="post" action="/auth/verify" hidden>
+  <label for="code">Six-digit code</label>
+  <input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required>
+  <button type="submit" id="verify">Sign in</button>
+  <p class="hint">Codes last ten minutes and work once. <a href="#" id="resend">Send another</a>.</p>
+</form>
+
+<div class="status" id="status" role="status" aria-live="polite"></div>
+<noscript><p class="hint">This page needs JavaScript to sign you in.</p></noscript>
+
+<script>
+(function () {
+  var phoneStep = document.getElementById('phone-step');
+  var codeStep = document.getElementById('code-step');
+  var status = document.getElementById('status');
+  var phone = document.getElementById('phone');
+
+  function say(msg, bad) {
+    status.textContent = msg;
+    status.className = bad ? 'status err' : 'status';
+  }
+
+  function post(url, body, onOK) {
+    say('Working…');
+    fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', 'accept': 'application/json' },
+      body: new URLSearchParams(body)
+    }).then(function (r) {
+      return r.json().then(function (data) { return { ok: r.ok, data: data }; });
+    }).then(function (res) {
+      if (!res.ok) { say(res.data.error || 'Something went wrong.', true); return; }
+      onOK(res.data);
+    }).catch(function () { say('Network trouble — try again.', true); });
+  }
+
+  phoneStep.addEventListener('submit', function (e) {
+    e.preventDefault();
+    post('/auth/request', { phone: phone.value }, function (data) {
+      phoneStep.hidden = true;
+      codeStep.hidden = false;
+      document.getElementById('code').focus();
+      say(data.message || 'Code sent.');
+    });
+  });
+
+  codeStep.addEventListener('submit', function (e) {
+    e.preventDefault();
+    post('/auth/verify', { phone: phone.value, code: document.getElementById('code').value }, function () {
+      window.location.href = '/dashboard';
+    });
+  });
+
+  document.getElementById('resend').addEventListener('click', function (e) {
+    e.preventDefault();
+    post('/auth/request', { phone: phone.value }, function (data) { say(data.message || 'Code sent.'); });
+  });
+})();
+</script>
+{{template "foot" .}}{{end}}

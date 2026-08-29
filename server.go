@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -46,7 +47,15 @@ type Server struct {
 	// afterFunc is time.AfterFunc in production; tests swap it for an
 	// immediate call so the backstop is observable without sleeping.
 	afterFunc func(time.Duration, func()) *time.Timer
+	// loginLimiter throttles sign-in traffic per client address.
+	loginLimiter *ipLimiter
+	// async tracks work started after a response has been written, so a test
+	// can wait for it rather than polling the database.
+	async sync.WaitGroup
 }
+
+// WaitAsync blocks until deferred post-response work has finished.
+func (s *Server) WaitAsync() { s.async.Wait() }
 
 // hangupGrace gives the agent a few seconds to deliver its farewell line before
 // the Twilio backstop cuts the call.
@@ -57,6 +66,9 @@ func NewServer(cfg Config, store *Store, brain *Brain, tel Telephony, voice Voic
 		cfg: cfg, store: store, brain: brain, tel: tel, voice: voice, cal: cal,
 		hangupGrace: defaultHangupGrace,
 		afterFunc:   time.AfterFunc,
+		// Ten sign-in attempts per client per five minutes: generous for a
+		// person mistyping a code, useless for walking a list of numbers.
+		loginLimiter: newIPLimiter(10, 5*time.Minute),
 	}
 }
 
@@ -84,6 +96,16 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/version", s.handleVersion)
 	mux.HandleFunc("/trigger", s.handleTrigger)
+	mux.HandleFunc("/webhooks/elevenlabs", timed("http.transcript", s.handleElevenLabsWebhook))
+	// Phone + one-time code sign-in, and the dashboard it protects.
+	mux.HandleFunc("/login", s.handleLoginPage)
+	mux.HandleFunc("/dashboard", s.handleDashboard)
+	mux.HandleFunc("/auth/request", timed("auth.request", s.handleAuthRequest))
+	mux.HandleFunc("/auth/verify", timed("auth.verify", s.handleAuthVerify))
+	mux.HandleFunc("/auth/logout", s.handleAuthLogout)
+	mux.HandleFunc("/api/me", s.requireUser(s.handleMe))
+	mux.HandleFunc("/api/transcripts", timed("api.transcripts", s.requireUser(s.handleTranscriptList)))
+	mux.HandleFunc("/api/transcripts/", s.requireUser(s.handleTranscriptItem))
 	// Tool webhooks land mid-conversation: their server time is dead air the
 	// caller hears, so each one is measured separately.
 	mux.HandleFunc("/tools/get_context", timed("tool.get_context", s.toolAuth(s.toolGetContext)))

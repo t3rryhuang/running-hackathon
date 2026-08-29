@@ -278,6 +278,13 @@ func (s *Store) ForgetUser(userID int64) error {
 			`DELETE FROM checkins WHERE user_id=?`,
 			`DELETE FROM suggestions WHERE user_id=?`,
 			`DELETE FROM webhook_events WHERE user_id=?`,
+			`DELETE FROM transcripts WHERE user_id=?`,
+			`DELETE FROM auth_sessions WHERE user_id=?`,
+			`DELETE FROM auth_audit WHERE user_id=?`,
+			// Login codes are keyed by number rather than by user, so they are
+			// cleared through the profile before it goes.
+			`DELETE FROM login_codes WHERE phone IN (SELECT phone FROM users WHERE id=?)`,
+			`DELETE FROM auth_audit WHERE phone IN (SELECT phone FROM users WHERE id=?)`,
 			`DELETE FROM users WHERE id=?`,
 		} {
 			if _, err := s.txExec(tx, stmt, userID); err != nil {

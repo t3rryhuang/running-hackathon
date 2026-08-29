@@ -191,6 +191,69 @@ CREATE TABLE IF NOT EXISTS webhook_events (
 		`UPDATE sessions SET state='closed', ended_at=CURRENT_TIMESTAMP WHERE state='open'`,
 		`CREATE INDEX IF NOT EXISTS sessions_user_flow ON sessions (user_id, flow, state)`,
 	}},
+
+	// Post-call transcripts, delivered by ElevenLabs after the call ends. A
+	// transcript belongs to exactly one user, resolved from the number that
+	// was dialled; a delivery whose number matches nobody is dropped rather
+	// than filed against a guess. conversation_id is unique so a retried
+	// delivery updates the same row instead of adding a second copy.
+	{Version: 8, Name: "transcripts", SQL: []string{`
+CREATE TABLE IF NOT EXISTS transcripts (
+	id {{pk}},
+	user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	conversation_id {{text}} NOT NULL,
+	call_sid {{text}} NOT NULL DEFAULT '',
+	direction {{text}} NOT NULL DEFAULT 'outbound',
+	status {{text}} NOT NULL DEFAULT '',
+	summary {{text}} NOT NULL DEFAULT '',
+	body {{text}} NOT NULL DEFAULT '',
+	turns INTEGER NOT NULL DEFAULT 0,
+	duration_seconds INTEGER NOT NULL DEFAULT 0,
+	started_at {{ts}} NOT NULL,
+	received_at {{ts}} NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS transcripts_conversation ON transcripts (conversation_id)`,
+		`CREATE INDEX IF NOT EXISTS transcripts_user ON transcripts (user_id, started_at DESC)`,
+	}},
+
+	// Phone + one-time code sign-in. Codes are stored only as a hash, so a
+	// dump of this table cannot be replayed, and each row records its own
+	// attempt count so a code cannot be brute-forced within its lifetime.
+	// Dashboard sessions are the same shape: only the hash of the token is
+	// kept, and revoking is a timestamp rather than a delete so the audit
+	// trail survives a logout.
+	{Version: 9, Name: "auth", SQL: []string{`
+CREATE TABLE IF NOT EXISTS login_codes (
+	id {{pk}},
+	phone {{text}} NOT NULL,
+	code_hash {{text}} NOT NULL,
+	attempts INTEGER NOT NULL DEFAULT 0,
+	created_at {{ts}} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	expires_at {{ts}} NOT NULL,
+	consumed_at {{ts}}
+)`, `
+CREATE TABLE IF NOT EXISTS auth_sessions (
+	id {{pk}},
+	user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	token_hash {{text}} NOT NULL,
+	created_at {{ts}} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	expires_at {{ts}} NOT NULL,
+	last_seen_at {{ts}},
+	revoked_at {{ts}}
+)`, `
+CREATE TABLE IF NOT EXISTS auth_audit (
+	id {{pk}},
+	phone {{text}} NOT NULL DEFAULT '',
+	user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+	event {{text}} NOT NULL,
+	detail {{text}} NOT NULL DEFAULT '',
+	created_at {{ts}} NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`,
+		`CREATE INDEX IF NOT EXISTS login_codes_phone ON login_codes (phone, created_at DESC)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS auth_sessions_token ON auth_sessions (token_hash)`,
+		`CREATE INDEX IF NOT EXISTS auth_sessions_user ON auth_sessions (user_id, expires_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS auth_audit_lookup ON auth_audit (phone, created_at DESC)`,
+	}},
 }
 
 // Store is the persistence layer. Every user-scoped query takes a user id and

@@ -16,6 +16,7 @@ type Config struct {
 	ElevenLabsAPIBase string
 	ElevenLabsAgentID string
 	ElevenLabsPhoneID string
+	ElevenLabsSecret  string
 	AnthropicAPIKey   string
 	AnthropicModel    string
 	TavilyAPIKey      string
@@ -49,6 +50,7 @@ func LoadConfig() Config {
 		ElevenLabsAPIBase: env("ELEVENLABS_API_BASE", "https://api.elevenlabs.io"),
 		ElevenLabsAgentID: os.Getenv("ELEVENLABS_AGENT_ID"),
 		ElevenLabsPhoneID: os.Getenv("ELEVENLABS_PHONE_ID"),
+		ElevenLabsSecret:  os.Getenv("ELEVENLABS_WEBHOOK_SECRET"),
 		AnthropicAPIKey:   os.Getenv("ANTHROPIC_API_KEY"),
 		AnthropicModel:    env("ANTHROPIC_MODEL", "claude-sonnet-5"),
 		TavilyAPIKey:      os.Getenv("TAVILY_API_KEY"),
@@ -60,14 +62,15 @@ func LoadConfig() Config {
 	}
 
 	required := map[string]string{
-		"TWILIO_ACCOUNT_SID":  c.TwilioAccountSID,
-		"TWILIO_AUTH_TOKEN":   c.TwilioAuthToken,
-		"TWILIO_NUMBER":       c.TwilioNumber,
-		"ELEVENLABS_API_KEY":  c.ElevenLabsAPIKey,
-		"ELEVENLABS_AGENT_ID": c.ElevenLabsAgentID,
-		"ELEVENLABS_PHONE_ID": c.ElevenLabsPhoneID,
-		"ANTHROPIC_API_KEY":   c.AnthropicAPIKey,
-		"TOOL_WEBHOOK_SECRET": c.ToolWebhookSecret,
+		"TWILIO_ACCOUNT_SID":        c.TwilioAccountSID,
+		"TWILIO_AUTH_TOKEN":         c.TwilioAuthToken,
+		"TWILIO_NUMBER":             c.TwilioNumber,
+		"ELEVENLABS_API_KEY":        c.ElevenLabsAPIKey,
+		"ELEVENLABS_AGENT_ID":       c.ElevenLabsAgentID,
+		"ELEVENLABS_PHONE_ID":       c.ElevenLabsPhoneID,
+		"ELEVENLABS_WEBHOOK_SECRET": c.ElevenLabsSecret,
+		"ANTHROPIC_API_KEY":         c.AnthropicAPIKey,
+		"TOOL_WEBHOOK_SECRET":       c.ToolWebhookSecret,
 	}
 	for k, v := range required {
 		if v == "" {

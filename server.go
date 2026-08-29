@@ -114,6 +114,8 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("/signup/start", timed("signup.start", s.handleSignupStart))
 	mux.HandleFunc("/api/me", s.requireUser(s.handleMe))
 	mux.HandleFunc("/api/name", s.requireUser(s.handleSetName))
+	mux.HandleFunc("/api/checkin", timed("api.checkin", s.requireUser(s.handleCheckinNow)))
+	mux.HandleFunc("/api/forget", s.handleForgetMe)
 	mux.HandleFunc("/api/transcripts", timed("api.transcripts", s.requireUser(s.handleTranscriptList)))
 	mux.HandleFunc("/api/transcripts/", s.requireUser(s.handleTranscriptItem))
 	// Tool webhooks land mid-conversation: their server time is dead air the
@@ -162,6 +164,13 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	// kept, so a refresh or a returning visit resumes where the profile
 	// actually is rather than starting again.
 	u := s.currentUser(r)
+	// Somebody who has already been through it is not asked to sign up again:
+	// completion is read from the phone-identified profile, not from anything
+	// the browser kept.
+	if stepFor(u) == stepDone {
+		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+		return
+	}
 	data := map[string]any{"Step": stepFor(u)}
 	if u != nil {
 		data["Name"] = u.DisplayName()
@@ -250,13 +259,10 @@ func (s *Server) handleCall(w http.ResponseWriter, r *http.Request) {
 	}
 	fields := requestFields(r)
 	phone := normalisePhone(fields["phone"])
-	// The sign-up page asks for a call without naming a number: after
-	// verification the session already says whose number it is, so the browser
-	// does not have to hold it and cannot ask us to ring somebody else.
-	if phone == "" {
-		if signedIn := s.currentUser(r); signedIn != nil {
-			phone = signedIn.Phone
-		}
+	// A session says whose number it is, so a signed-in browser never gets to
+	// name one: whatever it posts is dropped in favour of the verified number.
+	if signedIn := s.currentUser(r); signedIn != nil {
+		phone = signedIn.Phone
 	}
 	if !e164.MatchString(phone) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "phone must be E.164, e.g. +447700900123"})
@@ -446,7 +452,13 @@ func (s *Server) handleTrigger(w http.ResponseWriter, r *http.Request) {
 // check-in question would assume a relationship that does not exist.
 func (s *Server) TriggerCheckin(u *User) error {
 	defer func() { _ = s.store.MarkTriggered(u.ID, time.Now()) }()
-	if u.Channel == "call" {
+	return s.checkinOn(u, u.Channel)
+}
+
+// checkinOn opens a check-in over one channel, which the dashboard picks per
+// check-in rather than reading the stored preference.
+func (s *Server) checkinOn(u *User, channel string) error {
+	if channel == "call" {
 		return s.placeCall(u)
 	}
 	if !u.Onboarded() {

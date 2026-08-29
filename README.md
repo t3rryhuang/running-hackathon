@@ -170,8 +170,12 @@ exported to the process silently means SQLite.
 ## Sign-in and the dashboard
 
 `/login` takes a phone number, texts a six-digit code, and exchanges it for a session
-cookie; `/dashboard` then lists that user's own call transcripts with search, pagination and
-per-transcript deletion. The rules the implementation holds to:
+cookie. A profile that has already been through the interview goes straight to `/dashboard`
+rather than back through sign-up, decided from the phone-identified profile rather than
+anything the browser says. The dashboard lists that user's own call transcripts with search,
+pagination and per-transcript deletion, offers a deliberate call or text check-in, and carries
+a settings widget for renaming, signing out and erasing the account. The rules the
+implementation holds to:
 
 - Codes are random (`crypto/rand`), single-use, expire after 10 minutes, allow 5 wrong
   attempts, and are limited to 3 requests per number per 15 minutes plus an IP limit.
@@ -208,6 +212,11 @@ curl -s -X POST localhost:8090/signup/start --data-urlencode "phone=+44770090012
 curl -s -X POST localhost:8090/auth/verify  --data-urlencode "phone=+447700900123" -d "code=123456" -c jar
 curl -s -X POST localhost:8090/api/name -b jar -d "name=Rae"      # session-scoped, no phone accepted
 curl -s -X POST localhost:8090/signup   -b jar -d "channel=sms"   # refused until the name is stored
+
+# dashboard, for a profile that has already been through the interview
+curl -s -X POST localhost:8090/api/checkin -b jar -d "channel=call"    # check in now, on purpose
+curl -s -X POST localhost:8090/api/name    -b jar -d "name=Rae"        # change your name
+curl -s -X POST localhost:8090/api/forget  -b jar -d "confirm=DELETE"  # erase your own account
 curl -s -X POST localhost:8090/call     -d '{"phone":"+447700900123"}'     # ring them now
 curl -s -X POST localhost:8090/settings -d '{"phone":"+447700900123","frequency":"weekdays"}'
 curl -s -X POST "localhost:8090/trigger?phone=%2B447700900123"             # simulate a check-in

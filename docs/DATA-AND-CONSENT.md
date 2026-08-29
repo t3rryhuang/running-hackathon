@@ -92,6 +92,12 @@ audited. Revocation is immediate and does not require deletion.
   login codes, and audit rows older than 180 days.
 - A signed-in user can delete any single transcript themselves from the
   dashboard (`DELETE /api/transcripts/{id}`), scoped to their own id.
+- The dashboard's settings widget erases the whole account:
+  `POST /api/forget {confirm=DELETE}` runs the same transaction against the
+  profile the session resolves to, so there is no number to pass and no other
+  account it can reach. It writes no audit row - that row would keep the number
+  the person just asked us to forget - and it clears the session cookie, which
+  is why a second press is a no-op rather than an error.
 
 ### Ingestion API
 

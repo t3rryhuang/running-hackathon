@@ -1,11 +1,27 @@
 {{define "dashboard.html"}}{{template "head" .}}
-<h1>{{if .User.Name}}{{.User.Name}}'s calls{{else}}Your calls{{end}}</h1>
-<p class="sub">{{.User.Phone}} &middot; only you can see these &middot; kept for {{.RetainDays}} days</p>
+<h1>{{if .Name}}{{.Name}}'s calls{{else}}Your calls{{end}}</h1>
+<p class="sub">{{.PhoneMasked}} &middot; only you can see these &middot; kept for {{.RetainDays}} days</p>
+
+{{/* Nothing rings or texts on its own here: each check-in needs a press and a
+     confirmation, and it goes to the number the session resolves to. */}}
+<div class="panel">
+  <h2 class="panel-title">Check in now</h2>
+  <div class="choices">
+    <button class="choice" data-checkin="call">
+      <span class="glyph" aria-hidden="true">&#9742;</span>
+      <span class="copy"><strong>Call me</strong><span class="desc">A short voice conversation</span></span>
+    </button>
+    <button class="choice" data-checkin="sms">
+      <span class="glyph" aria-hidden="true">&#9993;</span>
+      <span class="copy"><strong>Text me</strong><span class="desc">A conversation over SMS</span></span>
+    </button>
+  </div>
+  <p class="hint" id="checkin-status" role="status" aria-live="polite"></p>
+</div>
 
 <div class="panel">
   <label for="q">Search your calls</label>
   <input id="q" type="search" placeholder="a word you said, or a summary" autocomplete="off">
-  <button id="signout" class="ghost">Sign out</button>
 </div>
 
 <div class="status" id="status" role="status" aria-live="polite">Loading your calls…</div>
@@ -16,6 +32,34 @@
   <span id="page-label"></span>
   <button id="next">Next</button>
 </div>
+
+<details class="panel settings" id="settings">
+  <summary>Settings</summary>
+
+  <form id="name-form" class="row">
+    <label for="set-name">Your name</label>
+    <input id="set-name" type="text" maxlength="60" autocomplete="given-name" value="{{.Name}}">
+    <button type="submit">Save name</button>
+  </form>
+  <p class="hint" id="name-status" role="status" aria-live="polite"></p>
+
+  <button id="signout" class="ghost">Sign out</button>
+
+  <div class="danger-zone">
+    <h3>Delete everything</h3>
+    <p class="hint">This erases your profile, name, number, preferences, messages,
+      check-ins, suggestions, call transcripts and sessions. It cannot be undone
+      and it signs you out.</p>
+    <button id="delete-open" class="ghost danger">Delete my data</button>
+    <form id="delete-form" hidden>
+      <label for="delete-confirm">Type DELETE to confirm</label>
+      <input id="delete-confirm" type="text" autocomplete="off" autocapitalize="characters">
+      <button type="submit" class="danger">Delete permanently</button>
+      <button type="button" id="delete-cancel" class="ghost">Cancel</button>
+    </form>
+    <p class="hint" id="delete-status" role="status" aria-live="polite"></p>
+  </div>
+</details>
 
 <noscript><p class="hint">This page needs JavaScript to load your calls.</p></noscript>
 
@@ -118,6 +162,79 @@
   });
   document.getElementById('prev').addEventListener('click', function () { if (page > 1) { page--; load(); } });
   document.getElementById('next').addEventListener('click', function () { if (page < pages) { page++; load(); } });
+  function post(path, body) {
+    return fetch(path, {
+      method: 'POST',
+      headers: { accept: 'application/json', 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(body)
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) { return { status: r.status, body: j }; });
+    });
+  }
+  function expired(res) {
+    if (res.status === 401) { window.location.href = '/login?expired=1'; return true; }
+    return false;
+  }
+
+  var checkinStatus = document.getElementById('checkin-status');
+  document.querySelectorAll('[data-checkin]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var channel = b.dataset.checkin;
+      var ask = channel === 'call' ? 'Call your phone now?' : 'Text you now?';
+      if (!window.confirm(ask)) return;
+      b.disabled = true;
+      checkinStatus.textContent = channel === 'call' ? 'Calling…' : 'Texting…';
+      post('/api/checkin', { channel: channel }).then(function (res) {
+        b.disabled = false;
+        if (expired(res)) return;
+        checkinStatus.textContent = res.body.ok ? res.body.message : (res.body.error || 'That did not work.');
+      }).catch(function () {
+        b.disabled = false;
+        checkinStatus.textContent = 'Could not reach the server.';
+      });
+    });
+  });
+
+  var nameStatus = document.getElementById('name-status');
+  document.getElementById('name-form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var field = document.getElementById('set-name');
+    nameStatus.textContent = 'Saving…';
+    post('/api/name', { name: field.value }).then(function (res) {
+      if (expired(res)) return;
+      if (!res.body.ok) {
+        field.setAttribute('aria-invalid', 'true');
+        nameStatus.textContent = res.body.error || 'Could not save that.';
+        return;
+      }
+      field.removeAttribute('aria-invalid');
+      field.value = res.body.name;
+      nameStatus.textContent = 'Saved. I\u2019ll call you ' + res.body.name + '.';
+    }).catch(function () { nameStatus.textContent = 'Could not reach the server.'; });
+  });
+
+  var deleteForm = document.getElementById('delete-form');
+  var deleteStatus = document.getElementById('delete-status');
+  document.getElementById('delete-open').addEventListener('click', function () {
+    deleteForm.hidden = false;
+    document.getElementById('delete-confirm').focus();
+  });
+  document.getElementById('delete-cancel').addEventListener('click', function () {
+    deleteForm.hidden = true;
+    deleteStatus.textContent = '';
+  });
+  deleteForm.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var typed = document.getElementById('delete-confirm').value.trim();
+    if (typed !== 'DELETE') { deleteStatus.textContent = 'Type DELETE to confirm.'; return; }
+    if (!window.confirm('Permanently delete everything we hold about you?')) return;
+    deleteStatus.textContent = 'Deleting…';
+    post('/api/forget', { confirm: 'DELETE' }).then(function (res) {
+      if (!res.body.ok) { deleteStatus.textContent = res.body.error || 'Could not delete your data.'; return; }
+      window.location.href = '/';
+    }).catch(function () { deleteStatus.textContent = 'Could not reach the server.'; });
+  });
+
   document.getElementById('signout').addEventListener('click', function () {
     fetch('/auth/logout', { method: 'POST', headers: { accept: 'application/json' } })
       .then(function () { window.location.href = '/login'; });

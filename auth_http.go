@@ -267,17 +267,29 @@ func (s *Server) handleSetName(w http.ResponseWriter, r *http.Request, u *User) 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": u.DisplayName(), "step": stepFor(u)})
 }
 
+// The sign-up steps, in order. Each one is decided from the phone-identified
+// profile rather than from anything the browser is holding.
+const (
+	stepPhone   = "phone"
+	stepName    = "name"
+	stepChannel = "channel"
+	stepDone    = "done"
+)
+
 // stepFor says where in the sign-up somebody actually is, so a refresh resumes
 // rather than restarting. The channel choice is deliberately unreachable until
-// there is a name on the profile.
+// there is a name on the profile, and somebody who has already been through the
+// interview has no sign-up left to do.
 func stepFor(u *User) string {
 	switch {
 	case u == nil:
-		return "phone"
+		return stepPhone
 	case u.DisplayName() == "":
-		return "name"
+		return stepName
+	case u.Onboarded():
+		return stepDone
 	default:
-		return "channel"
+		return stepChannel
 	}
 }
 
@@ -484,8 +496,11 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.render(w, "dashboard.html", map[string]any{
-		"User":       u,
-		"RetainDays": int(transcriptRetention.Hours() / 24),
-		"Protected":  true,
+		"Name":        u.DisplayName(),
+		"PhoneMasked": maskPhone(u.Phone),
+		"Channel":     u.Channel,
+		"Onboarded":   u.Onboarded(),
+		"RetainDays":  int(transcriptRetention.Hours() / 24),
+		"Protected":   true,
 	})
 }
